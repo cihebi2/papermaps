@@ -440,6 +440,59 @@ class TestCliRegression(unittest.TestCase):
             for row in payload["recent_runs"]:
                 self.assertEqual(row["job_name"], "smoke-run")
 
+    def test_report_summary_started_after_filter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_path = tmp_path / "report_started_after.db"
+            report_path = tmp_path / "summary_started_after.json"
+
+            init_rc = run_cli(["init-db", "--db-path", str(db_path)], ROOT)
+            self.assertEqual(init_rc.returncode, 0, msg=init_rc.stdout + init_rc.stderr)
+
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO runs (job_name, status, started_at, finished_at, detail)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    ("job-old", "success", "2024-01-01 00:00:00", "2024-01-01 00:01:00", "old"),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO runs (job_name, status, started_at, finished_at, detail)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    ("job-new", "success", "2026-02-01 00:00:00", "2026-02-01 00:01:00", "new"),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            report_rc = run_cli(
+                [
+                    "report-summary",
+                    "--db-path",
+                    str(db_path),
+                    "--out-file",
+                    str(report_path),
+                    "--format",
+                    "json",
+                    "--started-after",
+                    "2025-01-01",
+                    "--recent-runs",
+                    "10",
+                ],
+                ROOT,
+            )
+            self.assertEqual(report_rc.returncode, 0, msg=report_rc.stdout + report_rc.stderr)
+
+            payload = json.loads(report_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["started_after"], "2025-01-01")
+            job_names = [row["job_name"] for row in payload["recent_runs"]]
+            self.assertIn("job-new", job_names)
+            self.assertNotIn("job-old", job_names)
+
     def test_report_summary_max_detail_length_truncates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

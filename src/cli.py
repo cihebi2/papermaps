@@ -167,6 +167,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Include run stats_json field in report output",
     )
+    report_parser.add_argument(
+        "--started-after",
+        default=None,
+        help="Filter runs with started_at >= YYYY-MM-DD",
+    )
 
     export_parser = subparsers.add_parser("export-graph", help="Export paper graph from database")
     export_parser.add_argument("--db-path", default="data/papermap.db", help="SQLite file path")
@@ -757,6 +762,12 @@ def report_summary(args: argparse.Namespace) -> int:
     if int(args.max_detail_length) <= 0:
         LOGGER.error("Invalid --max-detail-length=%s (must be > 0)", args.max_detail_length)
         return 1
+    if args.started_after is not None:
+        try:
+            date.fromisoformat(str(args.started_after))
+        except ValueError:
+            LOGGER.error("Invalid --started-after=%s (expected YYYY-MM-DD)", args.started_after)
+            return 1
 
     if args.out_file:
         out_file = Path(args.out_file)
@@ -780,43 +791,50 @@ def report_summary(args: argparse.Namespace) -> int:
                     """
                     SELECT id, job_name, status, started_at, finished_at, detail, stats_json
                     FROM runs
-                    WHERE status = ? AND job_name = ?
+                    WHERE status = ? AND job_name = ? AND (? IS NULL OR started_at >= ?)
                     ORDER BY id DESC
                     LIMIT ?
                     """,
-                    (args.status_filter, args.job_name_filter, int(args.recent_runs)),
+                    (
+                        args.status_filter,
+                        args.job_name_filter,
+                        args.started_after,
+                        args.started_after,
+                        int(args.recent_runs),
+                    ),
                 ).fetchall()
             elif args.status_filter:
                 run_rows = conn.execute(
                     """
                     SELECT id, job_name, status, started_at, finished_at, detail, stats_json
                     FROM runs
-                    WHERE status = ?
+                    WHERE status = ? AND (? IS NULL OR started_at >= ?)
                     ORDER BY id DESC
                     LIMIT ?
                     """,
-                    (args.status_filter, int(args.recent_runs)),
+                    (args.status_filter, args.started_after, args.started_after, int(args.recent_runs)),
                 ).fetchall()
             elif args.job_name_filter:
                 run_rows = conn.execute(
                     """
                     SELECT id, job_name, status, started_at, finished_at, detail, stats_json
                     FROM runs
-                    WHERE job_name = ?
+                    WHERE job_name = ? AND (? IS NULL OR started_at >= ?)
                     ORDER BY id DESC
                     LIMIT ?
                     """,
-                    (args.job_name_filter, int(args.recent_runs)),
+                    (args.job_name_filter, args.started_after, args.started_after, int(args.recent_runs)),
                 ).fetchall()
             else:
                 run_rows = conn.execute(
                     """
                     SELECT id, job_name, status, started_at, finished_at, detail, stats_json
                     FROM runs
+                    WHERE (? IS NULL OR started_at >= ?)
                     ORDER BY id DESC
                     LIMIT ?
                     """,
-                    (int(args.recent_runs),),
+                    (args.started_after, args.started_after, int(args.recent_runs)),
                 ).fetchall()
 
         def truncate_detail(value: str | None) -> str | None:
@@ -868,6 +886,7 @@ def report_summary(args: argparse.Namespace) -> int:
             "recent_runs_limit": int(args.recent_runs),
             "status_filter": args.status_filter,
             "job_name_filter": args.job_name_filter,
+            "started_after": args.started_after,
             "max_detail_length": int(args.max_detail_length),
             "include_stats_json": bool(args.include_stats_json),
         }
@@ -884,6 +903,8 @@ def report_summary(args: argparse.Namespace) -> int:
                 lines.append(f"- Status filter: `{args.status_filter}`")
             if args.job_name_filter:
                 lines.append(f"- Job filter: `{args.job_name_filter}`")
+            if args.started_after:
+                lines.append(f"- Started after: `{args.started_after}`")
             lines.append("")
             lines.append("## Counts")
             lines.append(f"- papers: `{papers_count}`")
