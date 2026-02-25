@@ -285,6 +285,53 @@ class TestCliRegression(unittest.TestCase):
             self.assertEqual(payload["counts"]["runs"], 1)
             self.assertEqual(payload["recent_runs"][0]["job_name"], "smoke-run")
 
+    def test_report_summary_status_filter_only_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_path = tmp_path / "report_filter.db"
+            report_path = tmp_path / "summary_failed.json"
+            config_path = tmp_path / "config.yaml"
+            write_min_config(config_path, db_path)
+
+            smoke_rc = run_cli(["smoke-run", "--config", str(config_path), "--db-path", str(db_path)], ROOT)
+            self.assertEqual(smoke_rc.returncode, 0, msg=smoke_rc.stdout + smoke_rc.stderr)
+
+            fail_rc = run_cli(
+                [
+                    "ingest-dois",
+                    "--config",
+                    str(config_path),
+                    "--db-path",
+                    str(db_path),
+                    "--doi",
+                    "invalid-doi",
+                ],
+                ROOT,
+            )
+            self.assertNotEqual(fail_rc.returncode, 0)
+
+            report_rc = run_cli(
+                [
+                    "report-summary",
+                    "--db-path",
+                    str(db_path),
+                    "--out-file",
+                    str(report_path),
+                    "--format",
+                    "json",
+                    "--status-filter",
+                    "failed",
+                ],
+                ROOT,
+            )
+            self.assertEqual(report_rc.returncode, 0, msg=report_rc.stdout + report_rc.stderr)
+
+            payload = json.loads(report_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["status_filter"], "failed")
+            self.assertTrue(len(payload["recent_runs"]) >= 1)
+            for row in payload["recent_runs"]:
+                self.assertEqual(row["status"], "failed")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
