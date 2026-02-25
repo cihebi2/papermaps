@@ -176,6 +176,26 @@ def add_alert(
     status: str = "new",
     payload_json: str | None = None,
 ) -> int:
+    alert_id, _ = add_alert_if_new(
+        conn,
+        watch_target_id=watch_target_id,
+        paper_id=paper_id,
+        alert_type=alert_type,
+        status=status,
+        payload_json=payload_json,
+    )
+    return alert_id
+
+
+def add_alert_if_new(
+    conn: sqlite3.Connection,
+    *,
+    watch_target_id: int,
+    paper_id: str,
+    alert_type: str,
+    status: str = "new",
+    payload_json: str | None = None,
+) -> tuple[int, bool]:
     cursor = conn.execute(
         """
         INSERT OR IGNORE INTO alerts (watch_target_id, paper_id, alert_type, status, payload_json)
@@ -184,7 +204,7 @@ def add_alert(
         (int(watch_target_id), paper_id, alert_type, status, payload_json),
     )
     if int(cursor.rowcount) == 1:
-        return int(cursor.lastrowid)
+        return int(cursor.lastrowid), True
     row = conn.execute(
         """
         SELECT id
@@ -194,7 +214,7 @@ def add_alert(
         """,
         (int(watch_target_id), paper_id, alert_type),
     ).fetchone()
-    return int(row["id"]) if row is not None else 0
+    return (int(row["id"]), False) if row is not None else (0, False)
 
 
 def list_alerts(conn: sqlite3.Connection, *, status: str | None = None, limit: int = 100) -> list[sqlite3.Row]:

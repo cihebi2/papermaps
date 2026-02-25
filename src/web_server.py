@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -14,6 +14,7 @@ try:
     from .db_init import init_db
     from .openalex_client import OpenAlexClient, canonical_work_id
     from .storage import (
+        add_alert_if_new,
         add_saved_search,
         add_edge,
         add_watch_target,
@@ -22,12 +23,14 @@ try:
         list_saved_searches,
         list_watch_targets,
         set_app_setting,
+        update_watch_target_last_check,
         upsert_work,
     )
 except ImportError:
     from db_init import init_db
     from openalex_client import OpenAlexClient, canonical_work_id
     from storage import (
+        add_alert_if_new,
         add_saved_search,
         add_edge,
         add_watch_target,
@@ -36,6 +39,7 @@ except ImportError:
         list_saved_searches,
         list_watch_targets,
         set_app_setting,
+        update_watch_target_last_check,
         upsert_work,
     )
 
@@ -244,6 +248,20 @@ INDEX_HTML = """<!doctype html>
         <div id="savedSearchesResult" class="sub">No history loaded.</div>
       </div>
     </section>
+    <section class="panel">
+      <h2>Latest Scan</h2>
+      <div style="padding:12px 14px; display:grid; grid-template-columns: 170px 1fr; gap:10px; align-items:center;">
+        <label for="scanLookbackInput">Lookback days</label>
+        <input id="scanLookbackInput" type="number" min="1" max="365" value="30">
+        <label for="scanPagesInput">Pages per target</label>
+        <input id="scanPagesInput" type="number" min="1" max="20" value="1">
+        <span></span>
+        <div>
+          <button id="scanLatestBtn" type="button">Scan Latest Citing Papers</button>
+          <span id="scanLatestStatus" class="sub" style="margin-left:10px;"></span>
+        </div>
+      </div>
+    </section>
     <div id="error" class="error"></div>
     <div class="grid" id="cards"></div>
     <section class="panel">
@@ -291,6 +309,10 @@ INDEX_HTML = """<!doctype html>
     const savedLimitInput = document.getElementById("savedLimitInput");
     const savedRefreshBtn = document.getElementById("savedRefreshBtn");
     const savedSearchesResult = document.getElementById("savedSearchesResult");
+    const scanLookbackInput = document.getElementById("scanLookbackInput");
+    const scanPagesInput = document.getElementById("scanPagesInput");
+    const scanLatestBtn = document.getElementById("scanLatestBtn");
+    const scanLatestStatus = document.getElementById("scanLatestStatus");
     let timer = null;
 
     function esc(v) {
@@ -582,6 +604,28 @@ INDEX_HTML = """<!doctype html>
       }
     }
 
+    async function runLatestScan() {
+      scanLatestStatus.textContent = "";
+      const lookbackDays = Math.max(1, Number(scanLookbackInput.value || 30));
+      const pages = Math.max(1, Number(scanPagesInput.value || 1));
+      try {
+        const res = await fetch("/api/latest/scan", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            lookback_days: lookbackDays,
+            max_pages_per_target: pages,
+          }),
+        });
+        const payload = await res.json();
+        if (!res.ok) throw new Error(payload.error || `HTTP ${res.status}`);
+        scanLatestStatus.textContent = `targets=${payload.targets_scanned}, papers=${payload.citing_papers_processed}, new_alerts=${payload.alerts_new}`;
+        await loadData();
+      } catch (err) {
+        scanLatestStatus.textContent = `Scan failed: ${err}`;
+      }
+    }
+
     function startTimer() {
       if (timer) clearInterval(timer);
       if (autoRefresh.checked) {
@@ -596,6 +640,7 @@ INDEX_HTML = """<!doctype html>
     relatedBtn.addEventListener("click", exploreRelated);
     similarBtn.addEventListener("click", findSimilarThemes);
     savedRefreshBtn.addEventListener("click", loadSavedSearches);
+    scanLatestBtn.addEventListener("click", runLatestScan);
     autoRefresh.addEventListener("change", startTimer);
     recentRunsInput.addEventListener("change", loadData);
     loadOpenAlexSettings();
@@ -725,6 +770,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api/works/similar":
                 self._handle_post_similar_works()
+                LOGGER.info("web request success method=POST path=%s", parsed.path)
+                return
+            if parsed.path == "/api/latest/scan":
+                self._handle_post_latest_scan()
                 LOGGER.info("web request success method=POST path=%s", parsed.path)
                 return
             self._send_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
@@ -1146,6 +1195,74 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "topics": topics,
                 "similar": similar,
                 "save": save,
+            },
+            HTTPStatus.OK,
+        )
+
+    def _fallback_from_date(self, lookback_days: int) -> str:
+        return (date.today() - timedelta(days=max(1, int(lookback_days)))).isoformat()
+
+    def _handle_post_latest_scan(self) -> None:
+        body = self._read_json_body()
+        if body is None:
+            return
+        try:
+            lookback_days = max(1, int(body.get("lookback_days", 30)))
+            max_pages_per_target = int(body.get("max_pages_per_target", 1))
+        except ValueError:
+            self._send_json({"error": "lookback_days/max_pages_per_target must be integer"}, HTTPStatus.BAD_REQUEST)
+            return
+        if max_pages_per_target <= 0:
+            self._send_json({"error": "max_pages_per_target must be > 0"}, HTTPStatus.BAD_REQUEST)
+            return
+
+        client = self._build_openalex_client()
+        targets_scanned = 0
+        citing_processed = 0
+        alerts_new = 0
+
+        conn = connect(self.db_path)
+        try:
+            targets = list_watch_targets(conn, target_type="paper", include_disabled=False, limit=1000)
+            for target in targets:
+                target_id = str(target["target_value"])
+                watch_target_id = int(target["id"])
+                from_date = target["last_check_date"] or self._fallback_from_date(lookback_days)
+                targets_scanned += 1
+                try:
+                    for work in client.iter_citing_works(
+                        target_id,
+                        from_publication_date=str(from_date),
+                        max_pages=max_pages_per_target,
+                    ):
+                        citing_id = upsert_work(conn, work, source="web-latest-scan")
+                        add_edge(conn, citing_id, target_id, "cites")
+                        alert_id, created = add_alert_if_new(
+                            conn,
+                            watch_target_id=watch_target_id,
+                            paper_id=citing_id,
+                            alert_type="new_citation",
+                            status="new",
+                            payload_json=json.dumps(self._serialize_work(work), ensure_ascii=False),
+                        )
+                        if alert_id and created:
+                            alerts_new += 1
+                        citing_processed += 1
+                    update_watch_target_last_check(conn, "paper", target_id)
+                except Exception as exc:
+                    LOGGER.warning("latest-scan failed target=%s error=%s", target_id, exc)
+            conn.commit()
+        finally:
+            conn.close()
+
+        self._send_json(
+            {
+                "ok": True,
+                "targets_scanned": targets_scanned,
+                "citing_papers_processed": citing_processed,
+                "alerts_new": alerts_new,
+                "lookback_days": lookback_days,
+                "max_pages_per_target": max_pages_per_target,
             },
             HTTPStatus.OK,
         )

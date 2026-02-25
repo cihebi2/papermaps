@@ -762,6 +762,105 @@ class TestCliRegression(unittest.TestCase):
                 server.server_close()
                 thread.join(timeout=5)
 
+    def test_web_latest_scan_creates_new_alerts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_path = tmp_path / "web_latest_scan.db"
+
+            init_rc = run_cli(["init-db", "--db-path", str(db_path)], ROOT)
+            self.assertEqual(init_rc.returncode, 0, msg=init_rc.stdout + init_rc.stderr)
+
+            add_watch_rc = run_cli(
+                [
+                    "add-watch-target",
+                    "--db-path",
+                    str(db_path),
+                    "--target-type",
+                    "paper",
+                    "--target-value",
+                    "WSEED1",
+                    "--enabled",
+                    "1",
+                ],
+                ROOT,
+            )
+            self.assertEqual(add_watch_rc.returncode, 0, msg=add_watch_rc.stdout + add_watch_rc.stderr)
+
+            class _FakeClient:
+                def iter_citing_works(self, target_work_id: str, **kwargs: object):
+                    yield {
+                        "id": "https://openalex.org/WCITING1",
+                        "title": "New Citing Paper",
+                        "doi": "https://doi.org/10.1000/newciting",
+                        "publication_date": "2025-06-01",
+                        "primary_location": {"source": {"display_name": "Citing Journal"}},
+                    }
+
+            from src.web_server import create_http_server
+
+            with mock.patch("src.web_server.OpenAlexClient", return_value=_FakeClient()):
+                server = create_http_server(db_path, host="127.0.0.1", port=0, default_recent_runs=5)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    port = int(server.server_address[1])
+                    url = f"http://127.0.0.1:{port}/api/latest/scan"
+                    body = json.dumps({"lookback_days": 30, "max_pages_per_target": 1}).encode("utf-8")
+                    req = urllib.request.Request(
+                        url,
+                        data=body,
+                        method="POST",
+                        headers={"Content-Type": "application/json"},
+                    )
+                    with urllib.request.urlopen(req, timeout=2) as response:
+                        self.assertEqual(response.status, 200)
+                        payload = json.loads(response.read().decode("utf-8"))
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    thread.join(timeout=5)
+
+            self.assertEqual(payload["targets_scanned"], 1)
+            self.assertEqual(payload["alerts_new"], 1)
+
+            conn = sqlite3.connect(db_path)
+            try:
+                alerts_count = int(conn.execute("SELECT COUNT(*) FROM alerts WHERE alert_type='new_citation'").fetchone()[0])
+            finally:
+                conn.close()
+            self.assertEqual(alerts_count, 1)
+
+    def test_web_latest_scan_invalid_max_pages_returns_400(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_path = tmp_path / "web_latest_scan_invalid.db"
+
+            init_rc = run_cli(["init-db", "--db-path", str(db_path)], ROOT)
+            self.assertEqual(init_rc.returncode, 0, msg=init_rc.stdout + init_rc.stderr)
+
+            from src.web_server import create_http_server
+
+            server = create_http_server(db_path, host="127.0.0.1", port=0, default_recent_runs=5)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                port = int(server.server_address[1])
+                url = f"http://127.0.0.1:{port}/api/latest/scan"
+                body = json.dumps({"lookback_days": 30, "max_pages_per_target": 0}).encode("utf-8")
+                req = urllib.request.Request(
+                    url,
+                    data=body,
+                    method="POST",
+                    headers={"Content-Type": "application/json"},
+                )
+                with self.assertRaises(urllib.error.HTTPError) as cm:
+                    urllib.request.urlopen(req, timeout=2)
+                self.assertEqual(cm.exception.code, 400)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
     def test_smoke_run_success_writes_run_row(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
