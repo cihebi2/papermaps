@@ -661,6 +661,31 @@ class TestCliRegression(unittest.TestCase):
             self.assertEqual(row[1], "success")
             self.assertIn("targets=1", row[2] or "")
 
+    def test_track_citations_invalid_max_pages_per_target_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_path = tmp_path / "track_invalid_pages.db"
+            config_path = tmp_path / "config.yaml"
+            write_min_config(config_path, db_path)
+
+            result = run_cli(
+                [
+                    "track-citations",
+                    "--config",
+                    str(config_path),
+                    "--db-path",
+                    str(db_path),
+                    "--dry-run",
+                    "--target-id",
+                    "W1234567890",
+                    "--max-pages-per-target",
+                    "0",
+                ],
+                ROOT,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("invalid max-pages-per-target", result.stderr.lower() + result.stdout.lower())
+
     def test_track_citations_dry_run_with_target_id_override(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
