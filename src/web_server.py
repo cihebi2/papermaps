@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -11,12 +12,15 @@ from urllib.parse import parse_qs, urlparse
 
 try:
     from .db_init import init_db
-    from .storage import connect, get_app_setting, list_watch_targets, set_app_setting
+    from .openalex_client import OpenAlexClient, canonical_work_id
+    from .storage import add_watch_target, connect, get_app_setting, list_watch_targets, set_app_setting, upsert_work
 except ImportError:
     from db_init import init_db
-    from storage import connect, get_app_setting, list_watch_targets, set_app_setting
+    from openalex_client import OpenAlexClient, canonical_work_id
+    from storage import add_watch_target, connect, get_app_setting, list_watch_targets, set_app_setting, upsert_work
 
 LOGGER = logging.getLogger(__name__)
+DOI_REGEX = re.compile(r"10\.\d{4,9}/[-._;()/:A-Za-z0-9]+$")
 
 INDEX_HTML = """<!doctype html>
 <html lang="en">
@@ -147,6 +151,20 @@ INDEX_HTML = """<!doctype html>
         </div>
       </div>
     </section>
+    <section class="panel">
+      <h2>Search By DOI</h2>
+      <div style="padding:12px 14px; display:grid; grid-template-columns: 120px 1fr; gap:10px; align-items:center;">
+        <label for="doiInput">DOI</label>
+        <input id="doiInput" type="text" placeholder="10.1093/bib/bbae583 or https://doi.org/...">
+        <span></span>
+        <div>
+          <label><input id="saveWatchOnSearch" type="checkbox" checked> Save as watch target</label>
+          <button id="searchDoiBtn" type="button">Search DOI</button>
+        </div>
+        <label>Result</label>
+        <div id="doiResult" class="sub">No search yet.</div>
+      </div>
+    </section>
     <div id="error" class="error"></div>
     <div class="grid" id="cards"></div>
     <section class="panel">
@@ -172,6 +190,10 @@ INDEX_HTML = """<!doctype html>
     const openalexMailto = document.getElementById("openalexMailto");
     const saveSettingsBtn = document.getElementById("saveSettingsBtn");
     const settingsStatus = document.getElementById("settingsStatus");
+    const doiInput = document.getElementById("doiInput");
+    const searchDoiBtn = document.getElementById("searchDoiBtn");
+    const saveWatchOnSearch = document.getElementById("saveWatchOnSearch");
+    const doiResult = document.getElementById("doiResult");
     let timer = null;
 
     function esc(v) {
@@ -278,6 +300,46 @@ INDEX_HTML = """<!doctype html>
       }
     }
 
+    function renderDoiResult(work) {
+      if (!work) {
+        doiResult.textContent = "No work found.";
+        return;
+      }
+      const lines = [
+        `Title: ${work.title || "-"}`,
+        `Work ID: ${work.paper_id || "-"}`,
+        `DOI: ${work.doi || "-"}`,
+        `Published: ${work.published_date || "-"}`,
+        `Journal: ${work.journal || "-"}`,
+      ];
+      doiResult.innerHTML = lines.map((x) => esc(x)).join("<br>");
+    }
+
+    async function searchByDoi() {
+      doiResult.textContent = "";
+      const doi = doiInput.value.trim();
+      if (!doi) {
+        doiResult.textContent = "Please fill DOI first.";
+        return;
+      }
+      try {
+        const res = await fetch("/api/works/resolve-doi", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            doi,
+            save_watch: Boolean(saveWatchOnSearch.checked),
+          }),
+        });
+        const payload = await res.json();
+        if (!res.ok) throw new Error(payload.error || `HTTP ${res.status}`);
+        renderDoiResult(payload.work || null);
+        await loadData();
+      } catch (err) {
+        doiResult.textContent = `Search failed: ${err}`;
+      }
+    }
+
     function startTimer() {
       if (timer) clearInterval(timer);
       if (autoRefresh.checked) {
@@ -287,6 +349,7 @@ INDEX_HTML = """<!doctype html>
 
     refreshBtn.addEventListener("click", loadData);
     saveSettingsBtn.addEventListener("click", saveOpenAlexSettings);
+    searchDoiBtn.addEventListener("click", searchByDoi);
     autoRefresh.addEventListener("change", startTimer);
     recentRunsInput.addEventListener("change", loadData);
     loadOpenAlexSettings();
@@ -397,6 +460,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._handle_post_openalex_settings()
                 LOGGER.info("web request success method=POST path=%s", parsed.path)
                 return
+            if parsed.path == "/api/works/resolve-doi":
+                self._handle_post_resolve_doi()
+                LOGGER.info("web request success method=POST path=%s", parsed.path)
+                return
             self._send_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
         except Exception as exc:
             LOGGER.exception("web request failed method=POST path=%s error=%s", parsed.path, exc)
@@ -444,6 +511,76 @@ class DashboardHandler(BaseHTTPRequestHandler):
         finally:
             conn.close()
         self._send_json({"ok": True, "api_key_set": bool(api_key), "mailto": mailto}, HTTPStatus.OK)
+
+    def _normalize_doi(self, value: str) -> str | None:
+        text = str(value).strip().lower()
+        if text.startswith("https://doi.org/"):
+            text = text[len("https://doi.org/") :]
+        if text.startswith("doi:"):
+            text = text[4:]
+        text = text.strip()
+        if DOI_REGEX.fullmatch(text):
+            return text
+        return None
+
+    def _build_openalex_client(self) -> OpenAlexClient:
+        conn = connect(self.db_path)
+        try:
+            api_key = get_app_setting(conn, "openalex.api_key", default=None)
+            mailto = get_app_setting(conn, "openalex.mailto", default=None)
+        finally:
+            conn.close()
+        return OpenAlexClient(api_key=api_key, mailto=mailto)
+
+    def _serialize_work(self, work: dict[str, Any]) -> dict[str, Any]:
+        source_obj = ((work.get("primary_location") or {}).get("source") or {}) if isinstance(work, dict) else {}
+        paper_id = canonical_work_id(work.get("id"))
+        title = work.get("title") or work.get("display_name") or paper_id
+        doi = str(work.get("doi") or "").replace("https://doi.org/", "")
+        return {
+            "paper_id": paper_id,
+            "title": title,
+            "doi": doi or None,
+            "published_date": work.get("publication_date"),
+            "journal": source_obj.get("display_name"),
+            "cited_by_count": work.get("cited_by_count"),
+        }
+
+    def _handle_post_resolve_doi(self) -> None:
+        body = self._read_json_body()
+        if body is None:
+            return
+        doi = self._normalize_doi(str(body.get("doi", "")))
+        if not doi:
+            self._send_json({"error": "Invalid DOI"}, HTTPStatus.BAD_REQUEST)
+            return
+        save_watch = bool(body.get("save_watch", True))
+
+        client = self._build_openalex_client()
+        work = client.get_work_by_doi(doi)
+        if not work:
+            self._send_json({"error": "Work not found for DOI"}, HTTPStatus.NOT_FOUND)
+            return
+
+        conn = connect(self.db_path)
+        try:
+            paper_id = upsert_work(conn, work, source="web-resolve-doi")
+            if save_watch and paper_id:
+                add_watch_target(
+                    conn,
+                    target_type="paper",
+                    target_value=paper_id,
+                    enabled=1,
+                    note=f"web doi:{doi}",
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+        self._send_json(
+            {"ok": True, "saved_to_watch": save_watch, "work": self._serialize_work(work)},
+            HTTPStatus.OK,
+        )
 
     def _read_json_body(self) -> dict[str, Any] | None:
         raw_length = self.headers.get("Content-Length", "0")

@@ -10,6 +10,7 @@ import unittest
 import json
 import urllib.error
 import urllib.request
+from unittest import mock
 from pathlib import Path
 
 
@@ -257,6 +258,102 @@ class TestCliRegression(unittest.TestCase):
                 self.assertEqual(cm.exception.code, 400)
                 text = cm.exception.read().decode("utf-8")
                 self.assertIn("mailto", text)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
+    def test_web_resolve_doi_saves_paper_and_watch_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_path = tmp_path / "web_resolve_doi.db"
+
+            init_rc = run_cli(["init-db", "--db-path", str(db_path)], ROOT)
+            self.assertEqual(init_rc.returncode, 0, msg=init_rc.stdout + init_rc.stderr)
+
+            class _FakeClient:
+                def get_work_by_doi(self, doi: str) -> dict[str, object] | None:
+                    if doi != "10.1093/bib/bbae583":
+                        return None
+                    return {
+                        "id": "https://openalex.org/W42424242",
+                        "title": "Sample DOI Work",
+                        "doi": "https://doi.org/10.1093/bib/bbae583",
+                        "publication_date": "2024-12-01",
+                        "cited_by_count": 12,
+                        "primary_location": {"source": {"display_name": "Briefings in Bioinformatics"}},
+                    }
+
+            from src.web_server import create_http_server
+
+            with mock.patch("src.web_server.OpenAlexClient", return_value=_FakeClient()):
+                server = create_http_server(db_path, host="127.0.0.1", port=0, default_recent_runs=5)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    port = int(server.server_address[1])
+                    url = f"http://127.0.0.1:{port}/api/works/resolve-doi"
+                    body = json.dumps(
+                        {
+                            "doi": "10.1093/bib/bbae583",
+                            "save_watch": True,
+                        }
+                    ).encode("utf-8")
+                    req = urllib.request.Request(
+                        url,
+                        data=body,
+                        method="POST",
+                        headers={"Content-Type": "application/json"},
+                    )
+                    with urllib.request.urlopen(req, timeout=2) as response:
+                        self.assertEqual(response.status, 200)
+                        payload = json.loads(response.read().decode("utf-8"))
+                    self.assertTrue(payload["ok"])
+                    self.assertEqual(payload["work"]["paper_id"], "W42424242")
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    thread.join(timeout=5)
+
+            conn = sqlite3.connect(db_path)
+            try:
+                paper_count = int(conn.execute("SELECT COUNT(*) FROM papers WHERE paper_id='W42424242'").fetchone()[0])
+                watch_count = int(
+                    conn.execute("SELECT COUNT(*) FROM watch_targets WHERE target_value='W42424242'").fetchone()[0]
+                )
+            finally:
+                conn.close()
+            self.assertEqual(paper_count, 1)
+            self.assertEqual(watch_count, 1)
+
+    def test_web_resolve_doi_invalid_doi_returns_400(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_path = tmp_path / "web_resolve_doi_invalid.db"
+
+            init_rc = run_cli(["init-db", "--db-path", str(db_path)], ROOT)
+            self.assertEqual(init_rc.returncode, 0, msg=init_rc.stdout + init_rc.stderr)
+
+            from src.web_server import create_http_server
+
+            server = create_http_server(db_path, host="127.0.0.1", port=0, default_recent_runs=5)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                port = int(server.server_address[1])
+                url = f"http://127.0.0.1:{port}/api/works/resolve-doi"
+                body = json.dumps({"doi": "bad-doi", "save_watch": True}).encode("utf-8")
+                req = urllib.request.Request(
+                    url,
+                    data=body,
+                    method="POST",
+                    headers={"Content-Type": "application/json"},
+                )
+                with self.assertRaises(urllib.error.HTTPError) as cm:
+                    urllib.request.urlopen(req, timeout=2)
+                self.assertEqual(cm.exception.code, 400)
+                text = cm.exception.read().decode("utf-8")
+                self.assertIn("invalid doi", text.lower())
             finally:
                 server.shutdown()
                 server.server_close()
