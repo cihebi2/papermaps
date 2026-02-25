@@ -717,6 +717,29 @@ class TestCliRegression(unittest.TestCase):
             payload_all = json.loads(list_all.stdout)
             self.assertEqual(len(payload_all), 0)
 
+    def test_remove_watch_target_not_found_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_path = tmp_path / "watch_remove_missing.db"
+
+            init_rc = run_cli(["init-db", "--db-path", str(db_path)], ROOT)
+            self.assertEqual(init_rc.returncode, 0, msg=init_rc.stdout + init_rc.stderr)
+
+            remove_rc = run_cli(
+                [
+                    "remove-watch-target",
+                    "--db-path",
+                    str(db_path),
+                    "--target-type",
+                    "paper",
+                    "--target-value",
+                    "W1234567890",
+                ],
+                ROOT,
+            )
+            self.assertNotEqual(remove_rc.returncode, 0)
+            self.assertIn("not found", remove_rc.stderr.lower() + remove_rc.stdout.lower())
+
     def test_track_citations_dry_run_succeeds_without_network(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
