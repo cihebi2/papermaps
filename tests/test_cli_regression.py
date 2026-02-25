@@ -668,6 +668,55 @@ class TestCliRegression(unittest.TestCase):
             self.assertEqual(len(payload_all), 1)
             self.assertEqual(payload_all[0]["enabled"], 0)
 
+    def test_remove_watch_target_success(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_path = tmp_path / "watch_remove.db"
+
+            add_rc = run_cli(
+                [
+                    "add-watch-target",
+                    "--db-path",
+                    str(db_path),
+                    "--target-type",
+                    "paper",
+                    "--target-value",
+                    "W1234567890",
+                    "--enabled",
+                    "1",
+                ],
+                ROOT,
+            )
+            self.assertEqual(add_rc.returncode, 0, msg=add_rc.stdout + add_rc.stderr)
+
+            remove_rc = run_cli(
+                [
+                    "remove-watch-target",
+                    "--db-path",
+                    str(db_path),
+                    "--target-type",
+                    "paper",
+                    "--target-value",
+                    "W1234567890",
+                ],
+                ROOT,
+            )
+            self.assertEqual(remove_rc.returncode, 0, msg=remove_rc.stdout + remove_rc.stderr)
+
+            list_all = run_cli(
+                [
+                    "list-watch-targets",
+                    "--db-path",
+                    str(db_path),
+                    "--format",
+                    "json",
+                    "--include-disabled",
+                ],
+                ROOT,
+            )
+            payload_all = json.loads(list_all.stdout)
+            self.assertEqual(len(payload_all), 0)
+
     def test_track_citations_dry_run_succeeds_without_network(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

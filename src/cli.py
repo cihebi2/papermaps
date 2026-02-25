@@ -24,6 +24,7 @@ try:
         list_papers_and_edges,
         list_seed_paper_ids,
         list_watch_targets,
+        remove_watch_target,
         set_watch_target_enabled,
         update_watch_target_last_check,
         upsert_work,
@@ -41,6 +42,7 @@ except ImportError:
         list_papers_and_edges,
         list_seed_paper_ids,
         list_watch_targets,
+        remove_watch_target,
         set_watch_target_enabled,
         update_watch_target_last_check,
         upsert_work,
@@ -127,6 +129,11 @@ def build_parser() -> argparse.ArgumentParser:
     set_watch_parser.add_argument("--target-type", default="paper", help="Target type")
     set_watch_parser.add_argument("--target-value", required=True, help="Target value")
     set_watch_parser.add_argument("--enabled", type=int, choices=[0, 1], required=True, help="Enabled flag")
+
+    remove_watch_parser = subparsers.add_parser("remove-watch-target", help="Remove an existing watch target")
+    remove_watch_parser.add_argument("--db-path", default="data/papermap.db", help="SQLite file path")
+    remove_watch_parser.add_argument("--target-type", default="paper", help="Target type")
+    remove_watch_parser.add_argument("--target-value", required=True, help="Target value")
 
     report_parser = subparsers.add_parser("report-summary", help="Generate a markdown summary report from database")
     report_parser.add_argument("--db-path", default="data/papermap.db", help="SQLite file path")
@@ -698,6 +705,42 @@ def set_watch_enabled_command(args: argparse.Namespace) -> int:
         return 1
 
 
+def remove_watch_target_command(args: argparse.Namespace) -> int:
+    db_path = Path(args.db_path)
+    if not db_path.exists():
+        LOGGER.error("Database file does not exist: %s", db_path)
+        return 1
+
+    target_type = str(args.target_type).strip()
+    target_value = str(args.target_value).strip()
+    if target_type == "paper":
+        normalized = canonical_work_id(target_value)
+        if not normalized:
+            LOGGER.error("Invalid paper target-value, expected OpenAlex id like W123...")
+            return 1
+        target_value = normalized
+
+    try:
+        with connect(db_path) as conn:
+            changed = remove_watch_target(
+                conn,
+                target_type=target_type,
+                target_value=target_value,
+            )
+        if changed == 0:
+            LOGGER.error("Watch target not found target_type=%s target_value=%s", target_type, target_value)
+            return 1
+        LOGGER.info(
+            "remove-watch-target success target_type=%s target_value=%s",
+            target_type,
+            target_value,
+        )
+        return 0
+    except Exception:
+        LOGGER.exception("remove-watch-target failed db_path=%s", db_path)
+        return 1
+
+
 def report_summary(args: argparse.Namespace) -> int:
     db_path = Path(args.db_path)
     if not db_path.exists():
@@ -908,6 +951,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return list_watch_targets_command(args)
     if args.command == "set-watch-enabled":
         return set_watch_enabled_command(args)
+    if args.command == "remove-watch-target":
+        return remove_watch_target_command(args)
     if args.command == "report-summary":
         return report_summary(args)
     if args.command == "export-graph":

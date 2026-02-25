@@ -161,6 +161,25 @@ def set_watch_target_enabled(
     return int(cursor.rowcount)
 
 
+def remove_watch_target(
+    conn: sqlite3.Connection,
+    *,
+    target_type: str,
+    target_value: str,
+) -> int:
+    target = canonical_work_id(target_value) if target_type == "paper" else target_value
+    if not target:
+        return 0
+    cursor = conn.execute(
+        """
+        DELETE FROM watch_targets
+        WHERE target_type = ? AND target_value = ?
+        """,
+        (target_type, target),
+    )
+    return int(cursor.rowcount)
+
+
 def list_watch_targets(
     conn: sqlite3.Connection,
     *,
