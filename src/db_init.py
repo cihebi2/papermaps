@@ -41,8 +41,35 @@ SCHEMA_STATEMENTS = [
         paper_id TEXT,
         alert_type TEXT NOT NULL,
         status TEXT NOT NULL DEFAULT 'new',
+        payload_json TEXT,
+        pushed_at TEXT,
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (watch_target_id) REFERENCES watch_targets(id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS app_settings (
+        key TEXT PRIMARY KEY,
+        value TEXT,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS saved_searches (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        doi_list TEXT NOT NULL,
+        result_json TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS notification_targets (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        target_type TEXT NOT NULL,
+        target_value TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(target_type, target_value)
     )
     """,
     """
@@ -59,6 +86,7 @@ SCHEMA_STATEMENTS = [
 
 INDEX_STATEMENTS = [
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_watch_targets_unique ON watch_targets(target_type, target_value)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_alerts_unique ON alerts(watch_target_id, paper_id, alert_type)",
     "CREATE INDEX IF NOT EXISTS idx_edges_src_relation ON edges(src_paper_id, relation)",
     "CREATE INDEX IF NOT EXISTS idx_edges_dst_relation ON edges(dst_paper_id, relation)",
 ]
@@ -87,6 +115,11 @@ RUN_EXTRA_COLUMNS = {
     "stats_json": "TEXT",
 }
 
+ALERT_EXTRA_COLUMNS = {
+    "payload_json": "TEXT",
+    "pushed_at": "TEXT",
+}
+
 
 def _table_columns(connection: sqlite3.Connection, table_name: str) -> set[str]:
     cursor = connection.execute(f"PRAGMA table_info({table_name})")
@@ -105,6 +138,7 @@ def _run_migrations(connection: sqlite3.Connection) -> None:
     _ensure_columns(connection, "watch_targets", WATCH_EXTRA_COLUMNS)
     _ensure_columns(connection, "edges", EDGE_EXTRA_COLUMNS)
     _ensure_columns(connection, "runs", RUN_EXTRA_COLUMNS)
+    _ensure_columns(connection, "alerts", ALERT_EXTRA_COLUMNS)
     for statement in INDEX_STATEMENTS:
         connection.execute(statement)
 

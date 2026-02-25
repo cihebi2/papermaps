@@ -55,6 +55,171 @@ def connect(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
+def set_app_setting(conn: sqlite3.Connection, key: str, value: str | None) -> None:
+    setting_key = str(key).strip()
+    if not setting_key:
+        raise ValueError("Setting key must not be empty")
+    conn.execute(
+        """
+        INSERT INTO app_settings (key, value, updated_at)
+        VALUES (?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(key) DO UPDATE SET
+            value = excluded.value,
+            updated_at = CURRENT_TIMESTAMP
+        """,
+        (setting_key, value),
+    )
+
+
+def get_app_setting(conn: sqlite3.Connection, key: str, default: str | None = None) -> str | None:
+    setting_key = str(key).strip()
+    if not setting_key:
+        return default
+    row = conn.execute("SELECT value FROM app_settings WHERE key = ?", (setting_key,)).fetchone()
+    if row is None:
+        return default
+    return row["value"]
+
+
+def list_app_settings(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return list(conn.execute("SELECT key, value, updated_at FROM app_settings ORDER BY key ASC").fetchall())
+
+
+def add_saved_search(conn: sqlite3.Connection, doi_list: list[str], result_payload: dict[str, Any]) -> int:
+    dois = [str(item).strip().lower() for item in doi_list if str(item).strip()]
+    if not dois:
+        raise ValueError("doi_list must not be empty")
+    cursor = conn.execute(
+        """
+        INSERT INTO saved_searches (doi_list, result_json)
+        VALUES (?, ?)
+        """,
+        (
+            json.dumps(dois, ensure_ascii=False),
+            json.dumps(result_payload, ensure_ascii=False),
+        ),
+    )
+    return int(cursor.lastrowid)
+
+
+def list_saved_searches(conn: sqlite3.Connection, limit: int = 20) -> list[sqlite3.Row]:
+    return list(
+        conn.execute(
+            """
+            SELECT id, doi_list, result_json, created_at
+            FROM saved_searches
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (max(1, int(limit)),),
+        ).fetchall()
+    )
+
+
+def upsert_notification_target(
+    conn: sqlite3.Connection,
+    *,
+    target_type: str,
+    target_value: str,
+    enabled: int = 1,
+) -> int:
+    t_type = str(target_type).strip()
+    t_value = str(target_value).strip()
+    if not t_type or not t_value:
+        raise ValueError("target_type and target_value must not be empty")
+    conn.execute(
+        """
+        INSERT INTO notification_targets (target_type, target_value, enabled)
+        VALUES (?, ?, ?)
+        ON CONFLICT(target_type, target_value) DO UPDATE SET
+            enabled = excluded.enabled
+        """,
+        (t_type, t_value, int(enabled)),
+    )
+    row = conn.execute(
+        """
+        SELECT id
+        FROM notification_targets
+        WHERE target_type = ? AND target_value = ?
+        LIMIT 1
+        """,
+        (t_type, t_value),
+    ).fetchone()
+    return int(row["id"]) if row is not None else 0
+
+
+def list_notification_targets(
+    conn: sqlite3.Connection,
+    *,
+    target_type: str | None = None,
+    include_disabled: bool = False,
+    limit: int = 100,
+) -> list[sqlite3.Row]:
+    sql = "SELECT id, target_type, target_value, enabled, created_at FROM notification_targets WHERE 1=1"
+    params: list[Any] = []
+    if target_type is not None:
+        sql += " AND target_type = ?"
+        params.append(str(target_type))
+    if not include_disabled:
+        sql += " AND enabled = 1"
+    sql += " ORDER BY id ASC LIMIT ?"
+    params.append(max(1, int(limit)))
+    return list(conn.execute(sql, tuple(params)).fetchall())
+
+
+def add_alert(
+    conn: sqlite3.Connection,
+    *,
+    watch_target_id: int,
+    paper_id: str,
+    alert_type: str,
+    status: str = "new",
+    payload_json: str | None = None,
+) -> int:
+    cursor = conn.execute(
+        """
+        INSERT OR IGNORE INTO alerts (watch_target_id, paper_id, alert_type, status, payload_json)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (int(watch_target_id), paper_id, alert_type, status, payload_json),
+    )
+    if int(cursor.rowcount) == 1:
+        return int(cursor.lastrowid)
+    row = conn.execute(
+        """
+        SELECT id
+        FROM alerts
+        WHERE watch_target_id = ? AND paper_id = ? AND alert_type = ?
+        LIMIT 1
+        """,
+        (int(watch_target_id), paper_id, alert_type),
+    ).fetchone()
+    return int(row["id"]) if row is not None else 0
+
+
+def list_alerts(conn: sqlite3.Connection, *, status: str | None = None, limit: int = 100) -> list[sqlite3.Row]:
+    sql = "SELECT id, watch_target_id, paper_id, alert_type, status, payload_json, pushed_at, created_at FROM alerts WHERE 1=1"
+    params: list[Any] = []
+    if status is not None:
+        sql += " AND status = ?"
+        params.append(status)
+    sql += " ORDER BY id DESC LIMIT ?"
+    params.append(max(1, int(limit)))
+    return list(conn.execute(sql, tuple(params)).fetchall())
+
+
+def mark_alert_pushed(conn: sqlite3.Connection, alert_id: int) -> int:
+    cursor = conn.execute(
+        """
+        UPDATE alerts
+        SET status = 'pushed', pushed_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (int(alert_id),),
+    )
+    return int(cursor.rowcount)
+
+
 def upsert_work(conn: sqlite3.Connection, work: dict[str, Any], source: str | None = None) -> str:
     record = _work_to_record(work)
     conn.execute(
