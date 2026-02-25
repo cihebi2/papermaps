@@ -102,6 +102,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Forwarded to track-citations",
     )
 
+    add_watch_parser = subparsers.add_parser("add-watch-target", help="Add a watch target")
+    add_watch_parser.add_argument("--db-path", default="data/papermap.db", help="SQLite file path")
+    add_watch_parser.add_argument("--target-type", default="paper", help="Target type (default: paper)")
+    add_watch_parser.add_argument("--target-value", required=True, help="Target value (paper uses OpenAlex W id)")
+    add_watch_parser.add_argument("--note", default=None, help="Optional note")
+    add_watch_parser.add_argument("--enabled", type=int, choices=[0, 1], default=1, help="Enabled flag")
+
     report_parser = subparsers.add_parser("report-summary", help="Generate a markdown summary report from database")
     report_parser.add_argument("--db-path", default="data/papermap.db", help="SQLite file path")
     report_parser.add_argument("--out-file", default=None, help="Output markdown file path")
@@ -508,6 +515,47 @@ def run_scheduler(args: argparse.Namespace) -> int:
         return 1
 
 
+def add_watch_target_command(args: argparse.Namespace) -> int:
+    db_path = Path(args.db_path)
+    init_db(db_path)
+
+    target_type = str(args.target_type).strip()
+    target_value = str(args.target_value).strip()
+    if not target_type:
+        LOGGER.error("target-type must not be empty")
+        return 1
+    if not target_value:
+        LOGGER.error("target-value must not be empty")
+        return 1
+    if target_type == "paper":
+        normalized = canonical_work_id(target_value)
+        if not normalized:
+            LOGGER.error("Invalid paper target-value, expected OpenAlex id like W123...")
+            return 1
+        target_value = normalized
+
+    try:
+        with connect(db_path) as conn:
+            add_watch_target(
+                conn,
+                target_type=target_type,
+                target_value=target_value,
+                note=args.note,
+                enabled=int(args.enabled),
+            )
+        LOGGER.info(
+            "add-watch-target success db_path=%s target_type=%s target_value=%s enabled=%s",
+            db_path,
+            target_type,
+            target_value,
+            int(args.enabled),
+        )
+        return 0
+    except Exception:
+        LOGGER.exception("add-watch-target failed db_path=%s", db_path)
+        return 1
+
+
 def report_summary(args: argparse.Namespace) -> int:
     db_path = Path(args.db_path)
     if not db_path.exists():
@@ -712,6 +760,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return track_citations(args)
     if args.command == "run-scheduler":
         return run_scheduler(args)
+    if args.command == "add-watch-target":
+        return add_watch_target_command(args)
     if args.command == "report-summary":
         return report_summary(args)
     if args.command == "export-graph":

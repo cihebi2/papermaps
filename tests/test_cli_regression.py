@@ -418,6 +418,43 @@ class TestCliRegression(unittest.TestCase):
             self.assertEqual(payload["max_detail_length"], 5)
             self.assertEqual(payload["recent_runs"][0]["detail"], "abcde")
 
+    def test_add_watch_target_success(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_path = tmp_path / "watch_add.db"
+
+            result = run_cli(
+                [
+                    "add-watch-target",
+                    "--db-path",
+                    str(db_path),
+                    "--target-type",
+                    "paper",
+                    "--target-value",
+                    "W1234567890",
+                    "--note",
+                    "manual",
+                    "--enabled",
+                    "1",
+                ],
+                ROOT,
+            )
+            self.assertEqual(result.returncode, 0, msg=result.stdout + result.stderr)
+
+            conn = sqlite3.connect(db_path)
+            try:
+                row = conn.execute(
+                    "SELECT target_type, target_value, enabled, note FROM watch_targets ORDER BY id DESC LIMIT 1"
+                ).fetchone()
+            finally:
+                conn.close()
+
+            self.assertIsNotNone(row)
+            self.assertEqual(row[0], "paper")
+            self.assertEqual(row[1], "W1234567890")
+            self.assertEqual(row[2], 1)
+            self.assertEqual(row[3], "manual")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
