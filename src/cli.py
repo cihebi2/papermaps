@@ -484,6 +484,12 @@ def run_scheduler(args: argparse.Namespace) -> int:
     if int(args.interval_seconds) < 0:
         LOGGER.error("run-scheduler invalid interval-seconds=%s (must be >= 0)", args.interval_seconds)
         return 1
+    if int(args.max_pages_per_target) <= 0:
+        LOGGER.error(
+            "run-scheduler invalid max-pages-per-target=%s (must be > 0)",
+            args.max_pages_per_target,
+        )
+        return 1
 
     config = load_config(Path(args.config))
     db_path = resolve_db_path(args.db_path, config)

@@ -194,6 +194,31 @@ class TestCliRegression(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("invalid iterations", result.stderr.lower() + result.stdout.lower())
 
+    def test_run_scheduler_invalid_max_pages_per_target_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_path = tmp_path / "scheduler_invalid_pages.db"
+            config_path = tmp_path / "config.yaml"
+            write_min_config(config_path, db_path)
+
+            result = run_cli(
+                [
+                    "run-scheduler",
+                    "--config",
+                    str(config_path),
+                    "--db-path",
+                    str(db_path),
+                    "--iterations",
+                    "1",
+                    "--max-pages-per-target",
+                    "0",
+                    "--dry-run",
+                ],
+                ROOT,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("invalid max-pages-per-target", result.stderr.lower() + result.stdout.lower())
+
     def test_report_summary_generates_markdown(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
