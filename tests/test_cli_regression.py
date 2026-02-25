@@ -310,6 +310,42 @@ class TestCliRegression(unittest.TestCase):
             self.assertEqual(payload["counts"]["runs"], 1)
             self.assertEqual(payload["recent_runs"][0]["job_name"], "smoke-run")
 
+    def test_report_summary_include_stats_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_path = tmp_path / "report_stats.db"
+            report_path = tmp_path / "summary_stats.json"
+            config_path = tmp_path / "config.yaml"
+            write_min_config(config_path, db_path)
+
+            smoke_rc = run_cli(["smoke-run", "--config", str(config_path), "--db-path", str(db_path)], ROOT)
+            self.assertEqual(smoke_rc.returncode, 0, msg=smoke_rc.stdout + smoke_rc.stderr)
+
+            report_rc = run_cli(
+                [
+                    "report-summary",
+                    "--db-path",
+                    str(db_path),
+                    "--out-file",
+                    str(report_path),
+                    "--format",
+                    "json",
+                    "--include-stats-json",
+                    "--job-name-filter",
+                    "smoke-run",
+                    "--recent-runs",
+                    "1",
+                ],
+                ROOT,
+            )
+            self.assertEqual(report_rc.returncode, 0, msg=report_rc.stdout + report_rc.stderr)
+
+            payload = json.loads(report_path.read_text(encoding="utf-8"))
+            self.assertTrue(payload["include_stats_json"])
+            self.assertEqual(len(payload["recent_runs"]), 1)
+            self.assertIn("stats_json", payload["recent_runs"][0])
+            self.assertEqual(payload["recent_runs"][0]["stats_json"], {"ok": True})
+
     def test_report_summary_status_filter_only_failed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

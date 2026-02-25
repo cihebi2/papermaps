@@ -162,6 +162,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=200,
         help="Maximum detail length in report output",
     )
+    report_parser.add_argument(
+        "--include-stats-json",
+        action="store_true",
+        help="Include run stats_json field in report output",
+    )
 
     export_parser = subparsers.add_parser("export-graph", help="Export paper graph from database")
     export_parser.add_argument("--db-path", default="data/papermap.db", help="SQLite file path")
@@ -773,7 +778,7 @@ def report_summary(args: argparse.Namespace) -> int:
             if args.status_filter and args.job_name_filter:
                 run_rows = conn.execute(
                     """
-                    SELECT id, job_name, status, started_at, finished_at, detail
+                    SELECT id, job_name, status, started_at, finished_at, detail, stats_json
                     FROM runs
                     WHERE status = ? AND job_name = ?
                     ORDER BY id DESC
@@ -784,7 +789,7 @@ def report_summary(args: argparse.Namespace) -> int:
             elif args.status_filter:
                 run_rows = conn.execute(
                     """
-                    SELECT id, job_name, status, started_at, finished_at, detail
+                    SELECT id, job_name, status, started_at, finished_at, detail, stats_json
                     FROM runs
                     WHERE status = ?
                     ORDER BY id DESC
@@ -795,7 +800,7 @@ def report_summary(args: argparse.Namespace) -> int:
             elif args.job_name_filter:
                 run_rows = conn.execute(
                     """
-                    SELECT id, job_name, status, started_at, finished_at, detail
+                    SELECT id, job_name, status, started_at, finished_at, detail, stats_json
                     FROM runs
                     WHERE job_name = ?
                     ORDER BY id DESC
@@ -806,7 +811,7 @@ def report_summary(args: argparse.Namespace) -> int:
             else:
                 run_rows = conn.execute(
                     """
-                    SELECT id, job_name, status, started_at, finished_at, detail
+                    SELECT id, job_name, status, started_at, finished_at, detail, stats_json
                     FROM runs
                     ORDER BY id DESC
                     LIMIT ?
@@ -823,6 +828,32 @@ def report_summary(args: argparse.Namespace) -> int:
                 return text
             return text[:max_len]
 
+        def parse_stats(value: str | None) -> Any:
+            if value is None:
+                return None
+            text = str(value)
+            if not text:
+                return None
+            try:
+                return json.loads(text)
+            except Exception:
+                return text
+
+        recent_runs: list[dict[str, Any]] = [
+            {
+                "id": int(row["id"]),
+                "job_name": row["job_name"],
+                "status": row["status"],
+                "started_at": row["started_at"],
+                "finished_at": row["finished_at"],
+                "detail": truncate_detail(row["detail"]),
+            }
+            for row in run_rows
+        ]
+        if bool(args.include_stats_json):
+            for idx, row in enumerate(run_rows):
+                recent_runs[idx]["stats_json"] = parse_stats(row["stats_json"])
+
         payload = {
             "generated_at": datetime.now().isoformat(timespec="seconds"),
             "database": str(db_path),
@@ -833,21 +864,12 @@ def report_summary(args: argparse.Namespace) -> int:
                 "runs": runs_count,
             },
             "edge_relations": [{"relation": row["relation"], "count": int(row["cnt"])} for row in relation_rows],
-            "recent_runs": [
-                {
-                    "id": int(row["id"]),
-                    "job_name": row["job_name"],
-                    "status": row["status"],
-                    "started_at": row["started_at"],
-                    "finished_at": row["finished_at"],
-                    "detail": truncate_detail(row["detail"]),
-                }
-                for row in run_rows
-            ],
+            "recent_runs": recent_runs,
             "recent_runs_limit": int(args.recent_runs),
             "status_filter": args.status_filter,
             "job_name_filter": args.job_name_filter,
             "max_detail_length": int(args.max_detail_length),
+            "include_stats_json": bool(args.include_stats_json),
         }
 
         if args.format == "json":
@@ -879,10 +901,13 @@ def report_summary(args: argparse.Namespace) -> int:
             lines.append(f"## Recent Runs (last {int(args.recent_runs)})")
             if run_rows:
                 for row in run_rows:
-                    lines.append(
+                    item = (
                         f"- #{row['id']} `{row['job_name']}` `{row['status']}` "
                         f"start={row['started_at']} end={row['finished_at'] or '-'} detail={row['detail'] or '-'}"
                     )
+                    if bool(args.include_stats_json):
+                        item += f" stats_json={row['stats_json'] or '-'}"
+                    lines.append(item)
             else:
                 lines.append("- (none)")
             lines.append("")
