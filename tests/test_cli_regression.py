@@ -587,6 +587,55 @@ class TestCliRegression(unittest.TestCase):
             self.assertEqual(len(payload_all), 1)
             self.assertEqual(payload_all[0]["enabled"], 0)
 
+    def test_track_citations_dry_run_succeeds_without_network(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_path = tmp_path / "track_dry.db"
+            config_path = tmp_path / "config.yaml"
+            write_min_config(config_path, db_path)
+
+            add_rc = run_cli(
+                [
+                    "add-watch-target",
+                    "--db-path",
+                    str(db_path),
+                    "--target-type",
+                    "paper",
+                    "--target-value",
+                    "W1234567890",
+                    "--enabled",
+                    "1",
+                ],
+                ROOT,
+            )
+            self.assertEqual(add_rc.returncode, 0, msg=add_rc.stdout + add_rc.stderr)
+
+            track_rc = run_cli(
+                [
+                    "track-citations",
+                    "--config",
+                    str(config_path),
+                    "--db-path",
+                    str(db_path),
+                    "--dry-run",
+                ],
+                ROOT,
+            )
+            self.assertEqual(track_rc.returncode, 0, msg=track_rc.stdout + track_rc.stderr)
+
+            conn = sqlite3.connect(db_path)
+            try:
+                row = conn.execute(
+                    "SELECT job_name, status, detail FROM runs ORDER BY id DESC LIMIT 1"
+                ).fetchone()
+            finally:
+                conn.close()
+
+            self.assertIsNotNone(row)
+            self.assertEqual(row[0], "track-citations")
+            self.assertEqual(row[1], "success")
+            self.assertIn("targets=1", row[2] or "")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

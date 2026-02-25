@@ -85,6 +85,7 @@ def build_parser() -> argparse.ArgumentParser:
     track_parser.add_argument("--from-date", default=None, help="Override from_publication_date (YYYY-MM-DD)")
     track_parser.add_argument("--lookback-days", type=int, default=30, help="Fallback window when watch has no cursor")
     track_parser.add_argument("--max-pages-per-target", type=int, default=3, help="OpenAlex pages per target paper")
+    track_parser.add_argument("--dry-run", action="store_true", help="Validate tracking loop without API calls")
 
     scheduler_parser = subparsers.add_parser(
         "run-scheduler",
@@ -427,16 +428,23 @@ def track_citations(args: argparse.Namespace) -> int:
                 from_date = args.from_date or target["last_check_date"] or _fallback_from_date(args.lookback_days)
                 target_count += 1
                 try:
-                    works = client.iter_citing_works(
-                        target_id,
-                        from_publication_date=from_date,
-                        max_pages=int(args.max_pages_per_target),
-                    )
-                    for work in works:
-                        src_id = upsert_work(conn, work, source="track-citations")
-                        add_edge(conn, src_id, target_id, "cites", run_id=run_id)
-                        total_citing += 1
-                    update_watch_target_last_check(conn, "paper", target_id)
+                    if bool(args.dry_run):
+                        LOGGER.info(
+                            "track-citations dry-run target=%s from_date=%s skip API call",
+                            target_id,
+                            from_date,
+                        )
+                    else:
+                        works = client.iter_citing_works(
+                            target_id,
+                            from_publication_date=from_date,
+                            max_pages=int(args.max_pages_per_target),
+                        )
+                        for work in works:
+                            src_id = upsert_work(conn, work, source="track-citations")
+                            add_edge(conn, src_id, target_id, "cites", run_id=run_id)
+                            total_citing += 1
+                        update_watch_target_last_check(conn, "paper", target_id)
                 except Exception as exc:
                     LOGGER.warning("track-citations failed target=%s error=%s", target_id, exc)
         stats = {"target_count": target_count, "citing_papers_processed": total_citing}
@@ -496,6 +504,7 @@ def run_scheduler(args: argparse.Namespace) -> int:
                     from_date=args.from_date,
                     lookback_days=int(args.lookback_days),
                     max_pages_per_target=int(args.max_pages_per_target),
+                    dry_run=False,
                 )
                 rc = track_citations(track_args)
                 if rc != 0:
