@@ -563,6 +563,125 @@ class TestCliRegression(unittest.TestCase):
                 server.server_close()
                 thread.join(timeout=5)
 
+    def test_web_similar_works_returns_topic_matches(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_path = tmp_path / "web_similar.db"
+
+            init_rc = run_cli(["init-db", "--db-path", str(db_path)], ROOT)
+            self.assertEqual(init_rc.returncode, 0, msg=init_rc.stdout + init_rc.stderr)
+
+            class _FakeClient:
+                def get_work_by_doi(self, doi: str) -> dict[str, object] | None:
+                    if doi != "10.1000/seed-sim":
+                        return None
+                    return {
+                        "id": "https://openalex.org/WSEEDSIM",
+                        "title": "Seed Similar",
+                        "doi": "https://doi.org/10.1000/seed-sim",
+                        "publication_date": "2024-05-01",
+                        "concepts": [
+                            {"display_name": "Protein design", "score": 0.9},
+                            {"display_name": "Deep learning", "score": 0.8},
+                            {"display_name": "Bioinformatics", "score": 0.7},
+                        ],
+                        "primary_location": {"source": {"display_name": "Seed Journal"}},
+                    }
+
+                def iter_works(self, **kwargs: object):
+                    yield {
+                        "id": "https://openalex.org/WSIM1",
+                        "title": "Similar One",
+                        "doi": "https://doi.org/10.1000/sim1",
+                        "publication_date": "2025-01-01",
+                        "cited_by_count": 5,
+                        "primary_location": {"source": {"display_name": "Similar Journal"}},
+                    }
+                    yield {
+                        "id": "https://openalex.org/WSIM2",
+                        "title": "Similar Two",
+                        "doi": "https://doi.org/10.1000/sim2",
+                        "publication_date": "2025-01-02",
+                        "cited_by_count": 6,
+                        "primary_location": {"source": {"display_name": "Similar Journal"}},
+                    }
+
+            from src.web_server import create_http_server
+
+            with mock.patch("src.web_server.OpenAlexClient", return_value=_FakeClient()):
+                server = create_http_server(db_path, host="127.0.0.1", port=0, default_recent_runs=5)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    port = int(server.server_address[1])
+                    url = f"http://127.0.0.1:{port}/api/works/similar"
+                    body = json.dumps(
+                        {
+                            "doi": "10.1000/seed-sim",
+                            "max_similar": 2,
+                            "save": True,
+                        }
+                    ).encode("utf-8")
+                    req = urllib.request.Request(
+                        url,
+                        data=body,
+                        method="POST",
+                        headers={"Content-Type": "application/json"},
+                    )
+                    with urllib.request.urlopen(req, timeout=2) as response:
+                        self.assertEqual(response.status, 200)
+                        payload = json.loads(response.read().decode("utf-8"))
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    thread.join(timeout=5)
+
+            self.assertEqual(payload["seed"]["paper_id"], "WSEEDSIM")
+            self.assertEqual(len(payload["topics"]), 3)
+            self.assertEqual(len(payload["similar"]), 2)
+
+            conn = sqlite3.connect(db_path)
+            try:
+                similar_edges = int(
+                    conn.execute(
+                        "SELECT COUNT(*) FROM edges WHERE dst_paper_id='WSEEDSIM' AND relation='similar'"
+                    ).fetchone()[0]
+                )
+            finally:
+                conn.close()
+            self.assertGreaterEqual(similar_edges, 2)
+
+    def test_web_similar_works_invalid_doi_returns_400(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_path = tmp_path / "web_similar_invalid.db"
+
+            init_rc = run_cli(["init-db", "--db-path", str(db_path)], ROOT)
+            self.assertEqual(init_rc.returncode, 0, msg=init_rc.stdout + init_rc.stderr)
+
+            from src.web_server import create_http_server
+
+            server = create_http_server(db_path, host="127.0.0.1", port=0, default_recent_runs=5)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                port = int(server.server_address[1])
+                url = f"http://127.0.0.1:{port}/api/works/similar"
+                body = json.dumps({"doi": "bad", "max_similar": 2, "save": True}).encode("utf-8")
+                req = urllib.request.Request(
+                    url,
+                    data=body,
+                    method="POST",
+                    headers={"Content-Type": "application/json"},
+                )
+                with self.assertRaises(urllib.error.HTTPError) as cm:
+                    urllib.request.urlopen(req, timeout=2)
+                self.assertEqual(cm.exception.code, 400)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
     def test_smoke_run_success_writes_run_row(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

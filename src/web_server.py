@@ -205,6 +205,22 @@ INDEX_HTML = """<!doctype html>
         <div id="relatedResult" class="sub">No related search yet.</div>
       </div>
     </section>
+    <section class="panel">
+      <h2>Similar Themes</h2>
+      <div style="padding:12px 14px; display:grid; grid-template-columns: 120px 1fr; gap:10px; align-items:start;">
+        <label for="similarDoiInput">Seed DOI</label>
+        <input id="similarDoiInput" type="text" placeholder="10.xxxx/...">
+        <label for="maxSimilarInput">Max similar</label>
+        <input id="maxSimilarInput" type="number" min="1" max="30" value="8">
+        <span></span>
+        <div>
+          <label><input id="saveSimilarData" type="checkbox" checked> Save similar data</label>
+          <button id="similarBtn" type="button">Find Similar Themes</button>
+        </div>
+        <label>Similar Result</label>
+        <div id="similarResult" class="sub">No similar search yet.</div>
+      </div>
+    </section>
     <div id="error" class="error"></div>
     <div class="grid" id="cards"></div>
     <section class="panel">
@@ -244,6 +260,11 @@ INDEX_HTML = """<!doctype html>
     const saveRelatedData = document.getElementById("saveRelatedData");
     const relatedBtn = document.getElementById("relatedBtn");
     const relatedResult = document.getElementById("relatedResult");
+    const similarDoiInput = document.getElementById("similarDoiInput");
+    const maxSimilarInput = document.getElementById("maxSimilarInput");
+    const saveSimilarData = document.getElementById("saveSimilarData");
+    const similarBtn = document.getElementById("similarBtn");
+    const similarResult = document.getElementById("similarResult");
     let timer = null;
 
     function esc(v) {
@@ -471,6 +492,40 @@ INDEX_HTML = """<!doctype html>
       }
     }
 
+    async function findSimilarThemes() {
+      similarResult.textContent = "";
+      const doi = similarDoiInput.value.trim();
+      if (!doi) {
+        similarResult.textContent = "Please fill seed DOI.";
+        return;
+      }
+      const maxSimilar = Math.max(1, Number(maxSimilarInput.value || 8));
+      try {
+        const res = await fetch("/api/works/similar", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            doi,
+            max_similar: maxSimilar,
+            save: Boolean(saveSimilarData.checked),
+          }),
+        });
+        const payload = await res.json();
+        if (!res.ok) throw new Error(payload.error || `HTTP ${res.status}`);
+        const lines = [];
+        lines.push(`Seed: ${payload.seed?.paper_id || "-"} ${payload.seed?.title || "-"}`);
+        lines.push(`Topics: ${(payload.topics || []).join(", ") || "-"}`);
+        lines.push(`Similar count: ${(payload.similar || []).length}`);
+        for (const x of payload.similar || []) {
+          lines.push(`- ${x.paper_id || "-"} ${x.title || "-"} (${x.journal || "-"})`);
+        }
+        similarResult.innerHTML = lines.map((x) => esc(x)).join("<br>");
+        await loadData();
+      } catch (err) {
+        similarResult.textContent = `Similar search failed: ${err}`;
+      }
+    }
+
     function startTimer() {
       if (timer) clearInterval(timer);
       if (autoRefresh.checked) {
@@ -483,6 +538,7 @@ INDEX_HTML = """<!doctype html>
     searchDoiBtn.addEventListener("click", searchByDoi);
     searchDoiBatchBtn.addEventListener("click", searchByDoiBatch);
     relatedBtn.addEventListener("click", exploreRelated);
+    similarBtn.addEventListener("click", findSimilarThemes);
     autoRefresh.addEventListener("change", startTimer);
     recentRunsInput.addEventListener("change", loadData);
     loadOpenAlexSettings();
@@ -603,6 +659,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api/works/related":
                 self._handle_post_related_works()
+                LOGGER.info("web request success method=POST path=%s", parsed.path)
+                return
+            if parsed.path == "/api/works/similar":
+                self._handle_post_similar_works()
                 LOGGER.info("web request success method=POST path=%s", parsed.path)
                 return
             self._send_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
@@ -859,6 +919,105 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "seed": self._serialize_work(seed_work),
                 "references": references,
                 "citing": citing,
+                "save": save,
+            },
+            HTTPStatus.OK,
+        )
+
+    def _extract_topics(self, work: dict[str, Any], max_topics: int = 3) -> list[str]:
+        concepts = work.get("concepts") or []
+        scored: list[tuple[float, str]] = []
+        for item in concepts:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("display_name") or "").strip()
+            score = item.get("score")
+            if not name:
+                continue
+            try:
+                score_value = float(score) if score is not None else 0.0
+            except (TypeError, ValueError):
+                score_value = 0.0
+            scored.append((score_value, name))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        topics = [name for _, name in scored[:max_topics]]
+        return topics
+
+    def _handle_post_similar_works(self) -> None:
+        body = self._read_json_body()
+        if body is None:
+            return
+        doi = self._normalize_doi(str(body.get("doi", "")))
+        if not doi:
+            self._send_json({"error": "Invalid DOI"}, HTTPStatus.BAD_REQUEST)
+            return
+        try:
+            max_similar = max(1, int(body.get("max_similar", 8)))
+        except ValueError:
+            self._send_json({"error": "max_similar must be integer"}, HTTPStatus.BAD_REQUEST)
+            return
+        save = bool(body.get("save", True))
+
+        client = self._build_openalex_client()
+        seed_work = client.get_work_by_doi(doi)
+        if not seed_work:
+            self._send_json({"error": "Seed DOI not found"}, HTTPStatus.NOT_FOUND)
+            return
+        seed_id = canonical_work_id(seed_work.get("id"))
+        if not seed_id:
+            self._send_json({"error": "Seed work has invalid id"}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+        topics = self._extract_topics(seed_work, max_topics=3)
+        if not topics:
+            self._send_json({"error": "No concepts/topics found for seed paper"}, HTTPStatus.BAD_REQUEST)
+            return
+        query = " ".join(topics)
+
+        similar: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for work in client.iter_works(filter_str="has_abstract:true", search=query, sort="cited_by_count:desc", max_pages=2):
+            work_id = canonical_work_id(work.get("id"))
+            if not work_id or work_id == seed_id or work_id in seen:
+                continue
+            similar.append(self._serialize_work(work))
+            seen.add(work_id)
+            if len(similar) >= max_similar:
+                break
+
+        if save:
+            conn = connect(self.db_path)
+            try:
+                upsert_work(conn, seed_work, source="web-similar-seed")
+                add_watch_target(
+                    conn,
+                    target_type="paper",
+                    target_value=seed_id,
+                    enabled=1,
+                    note=f"web similar seed doi:{doi}",
+                )
+                for item in similar:
+                    if not item.get("paper_id"):
+                        continue
+                    raw_work = {
+                        "id": f"https://openalex.org/{item['paper_id']}",
+                        "title": item.get("title"),
+                        "doi": f"https://doi.org/{item['doi']}" if item.get("doi") else None,
+                        "publication_date": item.get("published_date"),
+                        "cited_by_count": item.get("cited_by_count"),
+                        "primary_location": {"source": {"display_name": item.get("journal")}},
+                    }
+                    upsert_work(conn, raw_work, source="web-similar-result")
+                    add_edge(conn, item["paper_id"], seed_id, "similar")
+                conn.commit()
+            finally:
+                conn.close()
+
+        self._send_json(
+            {
+                "ok": True,
+                "seed": self._serialize_work(seed_work),
+                "topics": topics,
+                "similar": similar,
                 "save": save,
             },
             HTTPStatus.OK,
