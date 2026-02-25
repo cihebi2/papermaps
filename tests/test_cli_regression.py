@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import json
 from pathlib import Path
 
 
@@ -246,6 +247,43 @@ class TestCliRegression(unittest.TestCase):
             )
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("database file does not exist", (result.stderr + result.stdout).lower())
+
+    def test_report_summary_json_generates_machine_readable_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_path = tmp_path / "report_json.db"
+            report_path = tmp_path / "summary.json"
+            config_path = tmp_path / "config.yaml"
+            write_min_config(config_path, db_path)
+
+            init_rc = run_cli(["init-db", "--db-path", str(db_path)], ROOT)
+            self.assertEqual(init_rc.returncode, 0, msg=init_rc.stdout + init_rc.stderr)
+
+            smoke_rc = run_cli(["smoke-run", "--config", str(config_path), "--db-path", str(db_path)], ROOT)
+            self.assertEqual(smoke_rc.returncode, 0, msg=smoke_rc.stdout + smoke_rc.stderr)
+
+            report_rc = run_cli(
+                [
+                    "report-summary",
+                    "--db-path",
+                    str(db_path),
+                    "--out-file",
+                    str(report_path),
+                    "--format",
+                    "json",
+                    "--recent-runs",
+                    "3",
+                ],
+                ROOT,
+            )
+            self.assertEqual(report_rc.returncode, 0, msg=report_rc.stdout + report_rc.stderr)
+            self.assertTrue(report_path.exists())
+
+            payload = json.loads(report_path.read_text(encoding="utf-8"))
+            self.assertIn("counts", payload)
+            self.assertIn("recent_runs", payload)
+            self.assertEqual(payload["counts"]["runs"], 1)
+            self.assertEqual(payload["recent_runs"][0]["job_name"], "smoke-run")
 
 
 if __name__ == "__main__":

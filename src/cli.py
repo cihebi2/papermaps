@@ -106,6 +106,12 @@ def build_parser() -> argparse.ArgumentParser:
     report_parser.add_argument("--db-path", default="data/papermap.db", help="SQLite file path")
     report_parser.add_argument("--out-file", default=None, help="Output markdown file path")
     report_parser.add_argument("--recent-runs", type=int, default=10, help="How many latest runs to include")
+    report_parser.add_argument(
+        "--format",
+        choices=["markdown", "json"],
+        default="markdown",
+        help="Summary output format",
+    )
 
     export_parser = subparsers.add_parser("export-graph", help="Export paper graph from database")
     export_parser.add_argument("--db-path", default="data/papermap.db", help="SQLite file path")
@@ -494,7 +500,11 @@ def report_summary(args: argparse.Namespace) -> int:
         LOGGER.error("Invalid --recent-runs=%s (must be > 0)", args.recent_runs)
         return 1
 
-    out_file = Path(args.out_file) if args.out_file else Path("outputs") / f"summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+    if args.out_file:
+        out_file = Path(args.out_file)
+    else:
+        ext = "md" if args.format == "markdown" else "json"
+        out_file = Path("outputs") / f"summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{ext}"
     out_file.parent.mkdir(parents=True, exist_ok=True)
 
     try:
@@ -517,37 +527,64 @@ def report_summary(args: argparse.Namespace) -> int:
                 (int(args.recent_runs),),
             ).fetchall()
 
-        lines: list[str] = []
-        lines.append("# Papermap Summary Report")
-        lines.append("")
-        lines.append(f"- Generated at: {datetime.now().isoformat(timespec='seconds')}")
-        lines.append(f"- Database: `{db_path}`")
-        lines.append("")
-        lines.append("## Counts")
-        lines.append(f"- papers: `{papers_count}`")
-        lines.append(f"- edges: `{edges_count}`")
-        lines.append(f"- watch_targets: `{watches_count}`")
-        lines.append(f"- runs: `{runs_count}`")
-        lines.append("")
-        lines.append("## Edge Relations")
-        if relation_rows:
-            for row in relation_rows:
-                lines.append(f"- {row['relation']}: `{row['cnt']}`")
-        else:
-            lines.append("- (none)")
-        lines.append("")
-        lines.append(f"## Recent Runs (last {int(args.recent_runs)})")
-        if run_rows:
-            for row in run_rows:
-                lines.append(
-                    f"- #{row['id']} `{row['job_name']}` `{row['status']}` "
-                    f"start={row['started_at']} end={row['finished_at'] or '-'} detail={row['detail'] or '-'}"
-                )
-        else:
-            lines.append("- (none)")
-        lines.append("")
+        payload = {
+            "generated_at": datetime.now().isoformat(timespec="seconds"),
+            "database": str(db_path),
+            "counts": {
+                "papers": papers_count,
+                "edges": edges_count,
+                "watch_targets": watches_count,
+                "runs": runs_count,
+            },
+            "edge_relations": [{"relation": row["relation"], "count": int(row["cnt"])} for row in relation_rows],
+            "recent_runs": [
+                {
+                    "id": int(row["id"]),
+                    "job_name": row["job_name"],
+                    "status": row["status"],
+                    "started_at": row["started_at"],
+                    "finished_at": row["finished_at"],
+                    "detail": row["detail"],
+                }
+                for row in run_rows
+            ],
+            "recent_runs_limit": int(args.recent_runs),
+        }
 
-        out_file.write_text("\n".join(lines), encoding="utf-8")
+        if args.format == "json":
+            out_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        else:
+            lines: list[str] = []
+            lines.append("# Papermap Summary Report")
+            lines.append("")
+            lines.append(f"- Generated at: {payload['generated_at']}")
+            lines.append(f"- Database: `{db_path}`")
+            lines.append("")
+            lines.append("## Counts")
+            lines.append(f"- papers: `{papers_count}`")
+            lines.append(f"- edges: `{edges_count}`")
+            lines.append(f"- watch_targets: `{watches_count}`")
+            lines.append(f"- runs: `{runs_count}`")
+            lines.append("")
+            lines.append("## Edge Relations")
+            if relation_rows:
+                for row in relation_rows:
+                    lines.append(f"- {row['relation']}: `{row['cnt']}`")
+            else:
+                lines.append("- (none)")
+            lines.append("")
+            lines.append(f"## Recent Runs (last {int(args.recent_runs)})")
+            if run_rows:
+                for row in run_rows:
+                    lines.append(
+                        f"- #{row['id']} `{row['job_name']}` `{row['status']}` "
+                        f"start={row['started_at']} end={row['finished_at'] or '-'} detail={row['detail'] or '-'}"
+                    )
+            else:
+                lines.append("- (none)")
+            lines.append("")
+            out_file.write_text("\n".join(lines), encoding="utf-8")
+
         LOGGER.info("report-summary wrote %s", out_file)
         return 0
     except Exception:

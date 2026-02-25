@@ -73,6 +73,13 @@
   - timestamped step doc:
     - `docs/dev_record_2026-02-25_172747_phase2_report_summary.md`
 
+9. 2026-02-25 17:34:22
+- Extended summary reporting for machine integration:
+  - `report-summary --format json`
+  - regression test for JSON output structure
+  - timestamped step doc:
+    - `docs/dev_record_2026-02-25_173422_phase2_report_json.md`
+
 ## 3. Current Constraints
 
 1. Out of scope until explicitly scheduled:

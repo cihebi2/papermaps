@@ -84,6 +84,12 @@ Generate markdown summary report from database:
 python src/cli.py report-summary --db-path data/papermap.db --out-file outputs/summary.md --recent-runs 10
 ```
 
+Generate machine-readable JSON summary:
+
+```bash
+python src/cli.py report-summary --db-path data/papermap.db --out-file outputs/summary.json --format json --recent-runs 10
+```
+
 Export graph files:
 
 ```bash
@@ -125,3 +131,4 @@ Covered checks:
 5. `run-scheduler` invalid iterations failure path
 6. `report-summary` markdown generation path
 7. `report-summary` missing DB failure path
+8. `report-summary` JSON generation path
