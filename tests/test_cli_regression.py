@@ -11,6 +11,7 @@ import json
 import urllib.error
 import urllib.request
 from unittest import mock
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 
@@ -860,6 +861,125 @@ class TestCliRegression(unittest.TestCase):
                 server.shutdown()
                 server.server_close()
                 thread.join(timeout=5)
+
+    def test_web_webhook_config_roundtrip(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_path = tmp_path / "web_webhook_config.db"
+
+            init_rc = run_cli(["init-db", "--db-path", str(db_path)], ROOT)
+            self.assertEqual(init_rc.returncode, 0, msg=init_rc.stdout + init_rc.stderr)
+
+            from src.web_server import create_http_server
+
+            server = create_http_server(db_path, host="127.0.0.1", port=0, default_recent_runs=5)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                port = int(server.server_address[1])
+                url = f"http://127.0.0.1:{port}/api/notifications/webhook"
+                body = json.dumps({"url": "http://127.0.0.1:9999/hook", "enabled": True}).encode("utf-8")
+                req = urllib.request.Request(
+                    url,
+                    data=body,
+                    method="POST",
+                    headers={"Content-Type": "application/json"},
+                )
+                with urllib.request.urlopen(req, timeout=2) as response:
+                    self.assertEqual(response.status, 200)
+
+                with urllib.request.urlopen(url, timeout=2) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                self.assertGreaterEqual(len(payload["items"]), 1)
+                self.assertEqual(payload["items"][0]["target_type"], "webhook")
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
+    def test_web_push_new_alerts_marks_pushed_and_calls_webhook(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_path = tmp_path / "web_push_alerts.db"
+
+            init_rc = run_cli(["init-db", "--db-path", str(db_path)], ROOT)
+            self.assertEqual(init_rc.returncode, 0, msg=init_rc.stdout + init_rc.stderr)
+
+            received: list[dict[str, object]] = []
+
+            class _HookHandler(BaseHTTPRequestHandler):
+                def do_POST(self):  # noqa: N802
+                    length = int(self.headers.get("Content-Length", "0"))
+                    payload = self.rfile.read(length).decode("utf-8") if length > 0 else "{}"
+                    received.append(json.loads(payload))
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(b'{"ok":true}')
+
+                def log_message(self, format: str, *args: object) -> None:
+                    return
+
+            hook_server = ThreadingHTTPServer(("127.0.0.1", 0), _HookHandler)
+            hook_thread = threading.Thread(target=hook_server.serve_forever, daemon=True)
+            hook_thread.start()
+
+            hook_url = f"http://127.0.0.1:{hook_server.server_address[1]}/hook"
+
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO notification_targets (target_type, target_value, enabled)
+                    VALUES ('webhook', ?, 1)
+                    """,
+                    (hook_url,),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO alerts (watch_target_id, paper_id, alert_type, status, payload_json)
+                    VALUES (1, 'WNEW1', 'new_citation', 'new', ?)
+                    """,
+                    (json.dumps({"paper_id": "WNEW1", "title": "New Paper"}),),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            from src.web_server import create_http_server
+
+            app_server = create_http_server(db_path, host="127.0.0.1", port=0, default_recent_runs=5)
+            app_thread = threading.Thread(target=app_server.serve_forever, daemon=True)
+            app_thread.start()
+            try:
+                port = int(app_server.server_address[1])
+                url = f"http://127.0.0.1:{port}/api/alerts/push-new"
+                body = json.dumps({"limit": 10}).encode("utf-8")
+                req = urllib.request.Request(
+                    url,
+                    data=body,
+                    method="POST",
+                    headers={"Content-Type": "application/json"},
+                )
+                with urllib.request.urlopen(req, timeout=3) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                self.assertTrue(payload["ok"])
+                self.assertEqual(payload["pushed"], 1)
+            finally:
+                app_server.shutdown()
+                app_server.server_close()
+                app_thread.join(timeout=5)
+                hook_server.shutdown()
+                hook_server.server_close()
+                hook_thread.join(timeout=5)
+
+            self.assertGreaterEqual(len(received), 1)
+            conn = sqlite3.connect(db_path)
+            try:
+                status = conn.execute("SELECT status FROM alerts WHERE paper_id='WNEW1' LIMIT 1").fetchone()[0]
+            finally:
+                conn.close()
+            self.assertEqual(status, "pushed")
 
     def test_smoke_run_success_writes_run_row(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

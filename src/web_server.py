@@ -9,6 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
+import urllib.request
 
 try:
     from .db_init import init_db
@@ -20,9 +21,13 @@ try:
         add_watch_target,
         connect,
         get_app_setting,
+        list_alerts,
+        list_notification_targets,
         list_saved_searches,
         list_watch_targets,
+        mark_alert_pushed,
         set_app_setting,
+        upsert_notification_target,
         update_watch_target_last_check,
         upsert_work,
     )
@@ -36,9 +41,13 @@ except ImportError:
         add_watch_target,
         connect,
         get_app_setting,
+        list_alerts,
+        list_notification_targets,
         list_saved_searches,
         list_watch_targets,
+        mark_alert_pushed,
         set_app_setting,
+        upsert_notification_target,
         update_watch_target_last_check,
         upsert_work,
     )
@@ -262,6 +271,19 @@ INDEX_HTML = """<!doctype html>
         </div>
       </div>
     </section>
+    <section class="panel">
+      <h2>Notification Push (Webhook)</h2>
+      <div style="padding:12px 14px; display:grid; grid-template-columns: 170px 1fr; gap:10px; align-items:center;">
+        <label for="webhookUrlInput">Webhook URL</label>
+        <input id="webhookUrlInput" type="text" placeholder="https://your-webhook.example/path">
+        <span></span>
+        <div>
+          <button id="saveWebhookBtn" type="button">Save Webhook</button>
+          <button id="pushAlertsBtn" type="button">Push New Alerts</button>
+          <span id="pushStatus" class="sub" style="margin-left:10px;"></span>
+        </div>
+      </div>
+    </section>
     <div id="error" class="error"></div>
     <div class="grid" id="cards"></div>
     <section class="panel">
@@ -313,6 +335,10 @@ INDEX_HTML = """<!doctype html>
     const scanPagesInput = document.getElementById("scanPagesInput");
     const scanLatestBtn = document.getElementById("scanLatestBtn");
     const scanLatestStatus = document.getElementById("scanLatestStatus");
+    const webhookUrlInput = document.getElementById("webhookUrlInput");
+    const saveWebhookBtn = document.getElementById("saveWebhookBtn");
+    const pushAlertsBtn = document.getElementById("pushAlertsBtn");
+    const pushStatus = document.getElementById("pushStatus");
     let timer = null;
 
     function esc(v) {
@@ -626,6 +652,53 @@ INDEX_HTML = """<!doctype html>
       }
     }
 
+    async function loadWebhookConfig() {
+      pushStatus.textContent = "";
+      try {
+        const res = await fetch("/api/notifications/webhook", { cache: "no-store" });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const payload = await res.json();
+        const first = (payload.items || [])[0];
+        webhookUrlInput.value = first ? (first.target_value || "") : "";
+      } catch (err) {
+        pushStatus.textContent = `Load webhook failed: ${err}`;
+      }
+    }
+
+    async function saveWebhookConfig() {
+      pushStatus.textContent = "";
+      try {
+        const url = webhookUrlInput.value.trim();
+        const res = await fetch("/api/notifications/webhook", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url, enabled: true }),
+        });
+        const payload = await res.json();
+        if (!res.ok) throw new Error(payload.error || `HTTP ${res.status}`);
+        pushStatus.textContent = "Webhook saved";
+      } catch (err) {
+        pushStatus.textContent = `Save webhook failed: ${err}`;
+      }
+    }
+
+    async function pushNewAlerts() {
+      pushStatus.textContent = "";
+      try {
+        const res = await fetch("/api/alerts/push-new", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ limit: 50 }),
+        });
+        const payload = await res.json();
+        if (!res.ok) throw new Error(payload.error || `HTTP ${res.status}`);
+        pushStatus.textContent = `alerts=${payload.alerts_considered}, pushed=${payload.pushed}, failed=${payload.failed}`;
+        await loadData();
+      } catch (err) {
+        pushStatus.textContent = `Push failed: ${err}`;
+      }
+    }
+
     function startTimer() {
       if (timer) clearInterval(timer);
       if (autoRefresh.checked) {
@@ -641,11 +714,14 @@ INDEX_HTML = """<!doctype html>
     similarBtn.addEventListener("click", findSimilarThemes);
     savedRefreshBtn.addEventListener("click", loadSavedSearches);
     scanLatestBtn.addEventListener("click", runLatestScan);
+    saveWebhookBtn.addEventListener("click", saveWebhookConfig);
+    pushAlertsBtn.addEventListener("click", pushNewAlerts);
     autoRefresh.addEventListener("change", startTimer);
     recentRunsInput.addEventListener("change", loadData);
     loadOpenAlexSettings();
     loadData();
     loadSavedSearches();
+    loadWebhookConfig();
     startTimer();
   </script>
 </body>
@@ -743,6 +819,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._handle_get_saved_searches(parsed.query)
                 LOGGER.info("web request success path=%s", parsed.path)
                 return
+            if parsed.path == "/api/notifications/webhook":
+                self._handle_get_webhook_targets()
+                LOGGER.info("web request success path=%s", parsed.path)
+                return
             self._send_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
         except Exception as exc:
             LOGGER.exception("web request failed path=%s error=%s", parsed.path, exc)
@@ -774,6 +854,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api/latest/scan":
                 self._handle_post_latest_scan()
+                LOGGER.info("web request success method=POST path=%s", parsed.path)
+                return
+            if parsed.path == "/api/notifications/webhook":
+                self._handle_post_webhook_target()
+                LOGGER.info("web request success method=POST path=%s", parsed.path)
+                return
+            if parsed.path == "/api/alerts/push-new":
+                self._handle_post_push_new_alerts()
                 LOGGER.info("web request success method=POST path=%s", parsed.path)
                 return
             self._send_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
@@ -1266,6 +1354,114 @@ class DashboardHandler(BaseHTTPRequestHandler):
             },
             HTTPStatus.OK,
         )
+
+    def _send_webhook(self, url: str, payload: dict[str, Any]) -> tuple[bool, str | None]:
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(
+            url=url,
+            data=data,
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=8) as response:
+                status = int(response.status)
+            if 200 <= status < 300:
+                return True, None
+            return False, f"HTTP {status}"
+        except Exception as exc:
+            return False, str(exc)
+
+    def _push_new_alerts(self, limit: int = 50) -> dict[str, Any]:
+        conn = connect(self.db_path)
+        try:
+            webhooks = list_notification_targets(conn, target_type="webhook", include_disabled=False, limit=20)
+            alerts = list_alerts(conn, status="new", limit=max(1, int(limit)))
+            if not webhooks:
+                return {"alerts_considered": len(alerts), "pushed": 0, "failed": len(alerts), "errors": ["No webhook configured"]}
+
+            pushed = 0
+            failed = 0
+            errors: list[str] = []
+            for alert in alerts:
+                payload = {
+                    "alert_id": int(alert["id"]),
+                    "watch_target_id": int(alert["watch_target_id"]),
+                    "paper_id": alert["paper_id"],
+                    "alert_type": alert["alert_type"],
+                    "status": alert["status"],
+                    "payload": json.loads(alert["payload_json"]) if alert["payload_json"] else None,
+                    "created_at": alert["created_at"],
+                }
+                sent = False
+                for webhook in webhooks:
+                    ok, err = self._send_webhook(str(webhook["target_value"]), payload)
+                    if ok:
+                        sent = True
+                    else:
+                        if err:
+                            errors.append(err)
+                if sent:
+                    mark_alert_pushed(conn, int(alert["id"]))
+                    pushed += 1
+                else:
+                    failed += 1
+            conn.commit()
+            return {"alerts_considered": len(alerts), "pushed": pushed, "failed": failed, "errors": errors[:10]}
+        finally:
+            conn.close()
+
+    def _handle_get_webhook_targets(self) -> None:
+        conn = connect(self.db_path)
+        try:
+            rows = list_notification_targets(conn, target_type="webhook", include_disabled=True, limit=20)
+        finally:
+            conn.close()
+        items = [
+            {
+                "id": int(row["id"]),
+                "target_type": row["target_type"],
+                "target_value": row["target_value"],
+                "enabled": int(row["enabled"]),
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ]
+        self._send_json({"items": items}, HTTPStatus.OK)
+
+    def _handle_post_webhook_target(self) -> None:
+        body = self._read_json_body()
+        if body is None:
+            return
+        url = str(body.get("url", "")).strip()
+        enabled = bool(body.get("enabled", True))
+        if not (url.startswith("http://") or url.startswith("https://")):
+            self._send_json({"error": "url must start with http:// or https://"}, HTTPStatus.BAD_REQUEST)
+            return
+        conn = connect(self.db_path)
+        try:
+            target_id = upsert_notification_target(
+                conn,
+                target_type="webhook",
+                target_value=url,
+                enabled=1 if enabled else 0,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        self._send_json({"ok": True, "id": target_id, "url": url, "enabled": enabled}, HTTPStatus.OK)
+
+    def _handle_post_push_new_alerts(self) -> None:
+        body = self._read_json_body()
+        if body is None:
+            return
+        try:
+            limit = max(1, int(body.get("limit", 50)))
+        except ValueError:
+            self._send_json({"error": "limit must be integer"}, HTTPStatus.BAD_REQUEST)
+            return
+        result = self._push_new_alerts(limit=limit)
+        self._send_json({"ok": True, **result}, HTTPStatus.OK)
 
     def _read_json_body(self) -> dict[str, Any] | None:
         raw_length = self.headers.get("Content-Length", "0")
