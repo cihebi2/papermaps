@@ -109,6 +109,13 @@ def build_parser() -> argparse.ArgumentParser:
     add_watch_parser.add_argument("--note", default=None, help="Optional note")
     add_watch_parser.add_argument("--enabled", type=int, choices=[0, 1], default=1, help="Enabled flag")
 
+    list_watch_parser = subparsers.add_parser("list-watch-targets", help="List watch targets")
+    list_watch_parser.add_argument("--db-path", default="data/papermap.db", help="SQLite file path")
+    list_watch_parser.add_argument("--target-type", default="paper", help="Target type")
+    list_watch_parser.add_argument("--include-disabled", action="store_true", help="Include disabled watch targets")
+    list_watch_parser.add_argument("--limit", type=int, default=100, help="Max rows to show")
+    list_watch_parser.add_argument("--format", choices=["text", "json"], default="text", help="Output format")
+
     report_parser = subparsers.add_parser("report-summary", help="Generate a markdown summary report from database")
     report_parser.add_argument("--db-path", default="data/papermap.db", help="SQLite file path")
     report_parser.add_argument("--out-file", default=None, help="Output markdown file path")
@@ -556,6 +563,52 @@ def add_watch_target_command(args: argparse.Namespace) -> int:
         return 1
 
 
+def list_watch_targets_command(args: argparse.Namespace) -> int:
+    db_path = Path(args.db_path)
+    if not db_path.exists():
+        LOGGER.error("Database file does not exist: %s", db_path)
+        return 1
+    if int(args.limit) <= 0:
+        LOGGER.error("Invalid --limit=%s (must be > 0)", args.limit)
+        return 1
+
+    try:
+        with connect(db_path) as conn:
+            rows = list_watch_targets(
+                conn,
+                target_type=str(args.target_type),
+                include_disabled=bool(args.include_disabled),
+                limit=int(args.limit),
+            )
+        payload = [
+            {
+                "id": int(row["id"]),
+                "target_type": row["target_type"],
+                "target_value": row["target_value"],
+                "enabled": int(row["enabled"]),
+                "last_check_date": row["last_check_date"],
+                "note": row["note"],
+            }
+            for row in rows
+        ]
+
+        if args.format == "json":
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            if not payload:
+                print("(none)")
+            else:
+                for row in payload:
+                    print(
+                        f"#{row['id']} type={row['target_type']} value={row['target_value']} "
+                        f"enabled={row['enabled']} last_check={row['last_check_date'] or '-'} note={row['note'] or '-'}"
+                    )
+        return 0
+    except Exception:
+        LOGGER.exception("list-watch-targets failed db_path=%s", db_path)
+        return 1
+
+
 def report_summary(args: argparse.Namespace) -> int:
     db_path = Path(args.db_path)
     if not db_path.exists():
@@ -762,6 +815,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_scheduler(args)
     if args.command == "add-watch-target":
         return add_watch_target_command(args)
+    if args.command == "list-watch-targets":
+        return list_watch_targets_command(args)
     if args.command == "report-summary":
         return report_summary(args)
     if args.command == "export-graph":
