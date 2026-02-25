@@ -166,6 +166,7 @@ def list_watch_targets(
     *,
     target_type: str = "paper",
     include_disabled: bool = False,
+    enabled: int | None = None,
     limit: int | None = None,
 ) -> list[sqlite3.Row]:
     base_sql = """
@@ -174,7 +175,10 @@ def list_watch_targets(
         WHERE target_type = ?
     """
     params: list[Any] = [target_type]
-    if not include_disabled:
+    if enabled is not None:
+        base_sql += " AND enabled = ?"
+        params.append(int(enabled))
+    elif not include_disabled:
         base_sql += " AND enabled = 1"
     base_sql += " ORDER BY id ASC"
     if limit is not None:

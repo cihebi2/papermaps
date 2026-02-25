@@ -547,6 +547,62 @@ class TestCliRegression(unittest.TestCase):
             all_payload = json.loads(list_all.stdout)
             self.assertEqual(len(all_payload), 2)
 
+    def test_list_watch_targets_enabled_filter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_path = tmp_path / "watch_filter.db"
+
+            add_enabled = run_cli(
+                [
+                    "add-watch-target",
+                    "--db-path",
+                    str(db_path),
+                    "--target-type",
+                    "paper",
+                    "--target-value",
+                    "W1234567890",
+                    "--enabled",
+                    "1",
+                ],
+                ROOT,
+            )
+            self.assertEqual(add_enabled.returncode, 0, msg=add_enabled.stdout + add_enabled.stderr)
+
+            add_disabled = run_cli(
+                [
+                    "add-watch-target",
+                    "--db-path",
+                    str(db_path),
+                    "--target-type",
+                    "paper",
+                    "--target-value",
+                    "W9999999999",
+                    "--enabled",
+                    "0",
+                ],
+                ROOT,
+            )
+            self.assertEqual(add_disabled.returncode, 0, msg=add_disabled.stdout + add_disabled.stderr)
+
+            list_disabled = run_cli(
+                [
+                    "list-watch-targets",
+                    "--db-path",
+                    str(db_path),
+                    "--format",
+                    "json",
+                    "--include-disabled",
+                    "--enabled",
+                    "0",
+                ],
+                ROOT,
+            )
+            self.assertEqual(list_disabled.returncode, 0, msg=list_disabled.stdout + list_disabled.stderr)
+            payload = json.loads(list_disabled.stdout)
+            self.assertEqual(len(payload), 1)
+            self.assertEqual(payload[0]["target_value"], "W9999999999")
+            self.assertEqual(payload[0]["enabled"], 0)
+
     def test_set_watch_enabled_updates_target(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

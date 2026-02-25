@@ -118,6 +118,7 @@ def build_parser() -> argparse.ArgumentParser:
     list_watch_parser.add_argument("--db-path", default="data/papermap.db", help="SQLite file path")
     list_watch_parser.add_argument("--target-type", default="paper", help="Target type")
     list_watch_parser.add_argument("--include-disabled", action="store_true", help="Include disabled watch targets")
+    list_watch_parser.add_argument("--enabled", type=int, choices=[0, 1], default=None, help="Filter by enabled flag")
     list_watch_parser.add_argument("--limit", type=int, default=100, help="Max rows to show")
     list_watch_parser.add_argument("--format", choices=["text", "json"], default="text", help="Output format")
 
@@ -627,6 +628,7 @@ def list_watch_targets_command(args: argparse.Namespace) -> int:
                 conn,
                 target_type=str(args.target_type),
                 include_disabled=bool(args.include_disabled),
+                enabled=args.enabled,
                 limit=int(args.limit),
             )
         payload = [
