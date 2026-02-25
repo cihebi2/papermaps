@@ -522,6 +522,71 @@ class TestCliRegression(unittest.TestCase):
             all_payload = json.loads(list_all.stdout)
             self.assertEqual(len(all_payload), 2)
 
+    def test_set_watch_enabled_updates_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_path = tmp_path / "watch_toggle.db"
+
+            add_rc = run_cli(
+                [
+                    "add-watch-target",
+                    "--db-path",
+                    str(db_path),
+                    "--target-type",
+                    "paper",
+                    "--target-value",
+                    "W1234567890",
+                    "--enabled",
+                    "1",
+                ],
+                ROOT,
+            )
+            self.assertEqual(add_rc.returncode, 0, msg=add_rc.stdout + add_rc.stderr)
+
+            disable_rc = run_cli(
+                [
+                    "set-watch-enabled",
+                    "--db-path",
+                    str(db_path),
+                    "--target-type",
+                    "paper",
+                    "--target-value",
+                    "W1234567890",
+                    "--enabled",
+                    "0",
+                ],
+                ROOT,
+            )
+            self.assertEqual(disable_rc.returncode, 0, msg=disable_rc.stdout + disable_rc.stderr)
+
+            list_enabled = run_cli(
+                [
+                    "list-watch-targets",
+                    "--db-path",
+                    str(db_path),
+                    "--format",
+                    "json",
+                ],
+                ROOT,
+            )
+            payload_enabled = json.loads(list_enabled.stdout)
+            self.assertEqual(len(payload_enabled), 0)
+
+            list_all = run_cli(
+                [
+                    "list-watch-targets",
+                    "--db-path",
+                    str(db_path),
+                    "--format",
+                    "json",
+                    "--include-disabled",
+                ],
+                ROOT,
+            )
+            payload_all = json.loads(list_all.stdout)
+            self.assertEqual(len(payload_all), 1)
+            self.assertEqual(payload_all[0]["enabled"], 0)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

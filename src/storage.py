@@ -140,6 +140,27 @@ def add_watch_target(
     )
 
 
+def set_watch_target_enabled(
+    conn: sqlite3.Connection,
+    *,
+    target_type: str,
+    target_value: str,
+    enabled: int,
+) -> int:
+    target = canonical_work_id(target_value) if target_type == "paper" else target_value
+    if not target:
+        return 0
+    cursor = conn.execute(
+        """
+        UPDATE watch_targets
+        SET enabled = ?
+        WHERE target_type = ? AND target_value = ?
+        """,
+        (int(enabled), target_type, target),
+    )
+    return int(cursor.rowcount)
+
+
 def list_watch_targets(
     conn: sqlite3.Connection,
     *,
