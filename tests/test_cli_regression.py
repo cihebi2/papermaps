@@ -75,6 +75,35 @@ class TestCliRegression(unittest.TestCase):
             table_names = {row[0] for row in rows}
             self.assertTrue({"papers", "edges", "watch_targets", "alerts", "runs"}.issubset(table_names))
 
+    def test_export_graph_formats_all_writes_three_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_path = tmp_path / "export_all.db"
+            out_dir = tmp_path / "out"
+
+            init_rc = run_cli(["init-db", "--db-path", str(db_path)], ROOT)
+            self.assertEqual(init_rc.returncode, 0, msg=init_rc.stdout + init_rc.stderr)
+
+            export_rc = run_cli(
+                [
+                    "export-graph",
+                    "--db-path",
+                    str(db_path),
+                    "--out-dir",
+                    str(out_dir),
+                    "--prefix",
+                    "graphall",
+                    "--formats",
+                    "all",
+                ],
+                ROOT,
+            )
+            self.assertEqual(export_rc.returncode, 0, msg=export_rc.stdout + export_rc.stderr)
+
+            self.assertEqual(len(list(out_dir.glob("graphall_*.json"))), 1)
+            self.assertEqual(len(list(out_dir.glob("graphall_*.gexf"))), 1)
+            self.assertEqual(len(list(out_dir.glob("graphall_*.html"))), 1)
+
     def test_smoke_run_success_writes_run_row(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

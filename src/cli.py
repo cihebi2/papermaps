@@ -951,6 +951,9 @@ def export_graph(args: argparse.Namespace) -> int:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     prefix = str(args.prefix).strip() or "papermap"
     formats = {item.strip().lower() for item in str(args.formats).split(",") if item.strip()}
+    if "all" in formats:
+        formats.update({"json", "gexf", "html"})
+        formats.discard("all")
 
     with connect(db_path) as conn:
         nodes, edges = list_papers_and_edges(conn)
