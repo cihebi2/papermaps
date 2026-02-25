@@ -1,0 +1,445 @@
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import os
+import re
+from collections import deque
+from datetime import date, datetime, timedelta
+from pathlib import Path
+from typing import Any, Sequence
+
+try:
+    from .config_loader import config_get, load_config, resolve_db_path
+    from .db_init import create_run, finish_run, init_db
+    from .graph_export import export_graph_gexf, export_graph_html, export_graph_json
+    from .openalex_client import OpenAlexClient, canonical_work_id
+    from .storage import (
+        add_edge,
+        add_watch_target,
+        connect,
+        ensure_paper_stub,
+        list_papers_and_edges,
+        list_seed_paper_ids,
+        list_watch_targets,
+        update_watch_target_last_check,
+        upsert_work,
+    )
+except ImportError:
+    from config_loader import config_get, load_config, resolve_db_path
+    from db_init import create_run, finish_run, init_db
+    from graph_export import export_graph_gexf, export_graph_html, export_graph_json
+    from openalex_client import OpenAlexClient, canonical_work_id
+    from storage import (
+        add_edge,
+        add_watch_target,
+        connect,
+        ensure_paper_stub,
+        list_papers_and_edges,
+        list_seed_paper_ids,
+        list_watch_targets,
+        update_watch_target_last_check,
+        upsert_work,
+    )
+
+LOGGER = logging.getLogger(__name__)
+DOI_REGEX = re.compile(r"10\.\d{4,9}/[-._;()/:A-Za-z0-9]+$")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="papermaps command line tools")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    init_db_parser = subparsers.add_parser("init-db", help="Initialize SQLite database schema")
+    init_db_parser.add_argument("--db-path", default="data/papermap.db", help="SQLite file path")
+
+    smoke_run_parser = subparsers.add_parser(
+        "smoke-run",
+        help="Load config and write a smoke run record into runs table",
+    )
+    smoke_run_parser.add_argument("--config", required=True, help="Config file path")
+    smoke_run_parser.add_argument("--db-path", default=None, help="SQLite file path override")
+
+    ingest_parser = subparsers.add_parser("ingest-dois", help="Ingest seed papers by DOI via OpenAlex")
+    ingest_parser.add_argument("--config", required=True, help="Config file path")
+    ingest_parser.add_argument("--db-path", default=None, help="SQLite file path override")
+    ingest_parser.add_argument("--doi", action="append", default=[], help="DOI (repeatable)")
+    ingest_parser.add_argument("--doi-file", default=None, help="Text file containing DOI list")
+    ingest_parser.add_argument("--no-watch", action="store_true", help="Do not add ingested papers to watch targets")
+
+    expand_parser = subparsers.add_parser("expand-references", help="Expand reference graph from seed papers")
+    expand_parser.add_argument("--config", required=True, help="Config file path")
+    expand_parser.add_argument("--db-path", default=None, help="SQLite file path override")
+    expand_parser.add_argument("--depth", type=int, default=1, help="Expansion depth from start papers")
+    expand_parser.add_argument("--max-nodes", type=int, default=200, help="Maximum nodes to discover in this run")
+    expand_parser.add_argument("--max-refs-per-paper", type=int, default=200, help="Reference cap per source paper")
+    expand_parser.add_argument("--start-id", action="append", default=[], help="Start OpenAlex work id (repeatable)")
+
+    track_parser = subparsers.add_parser("track-citations", help="Track latest papers citing watched papers")
+    track_parser.add_argument("--config", required=True, help="Config file path")
+    track_parser.add_argument("--db-path", default=None, help="SQLite file path override")
+    track_parser.add_argument("--from-date", default=None, help="Override from_publication_date (YYYY-MM-DD)")
+    track_parser.add_argument("--lookback-days", type=int, default=30, help="Fallback window when watch has no cursor")
+    track_parser.add_argument("--max-pages-per-target", type=int, default=3, help="OpenAlex pages per target paper")
+
+    export_parser = subparsers.add_parser("export-graph", help="Export paper graph from database")
+    export_parser.add_argument("--db-path", default="data/papermap.db", help="SQLite file path")
+    export_parser.add_argument("--out-dir", default="outputs", help="Output directory")
+    export_parser.add_argument("--prefix", default="papermap", help="Output filename prefix")
+    export_parser.add_argument(
+        "--formats",
+        default="json,gexf,html",
+        help="Comma-separated formats: json,gexf,html",
+    )
+    return parser
+
+
+def _json_stats(payload: dict[str, Any]) -> str:
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+
+
+def _mark_run_failed(db_path: Path, run_id: int, error_message: str) -> None:
+    try:
+        finish_run(db_path, run_id, "failed", detail=error_message)
+    except Exception:
+        LOGGER.exception("failed to update run status to failed run_id=%s", run_id)
+
+
+def _build_openalex_client(config: dict[str, Any]) -> OpenAlexClient:
+    config_api_key = config_get(config, "openalex", "api_key", "")
+    api_key = str(config_api_key).strip() if config_api_key is not None else ""
+    if not api_key:
+        api_key = os.getenv("OPENALEX_API_KEY", "")
+    mailto_cfg = config_get(config, "openalex", "mailto", "")
+    base_url_cfg = config_get(config, "openalex", "base_url", "https://api.openalex.org")
+    per_page_cfg = config_get(config, "openalex", "per_page", 200)
+    sleep_cfg = config_get(config, "openalex", "sleep", 0.1)
+    timeout_cfg = config_get(config, "openalex", "timeout_s", 30)
+    retries_cfg = config_get(config, "openalex", "max_retries", 3)
+    return OpenAlexClient(
+        api_key=str(api_key).strip() or None,
+        mailto=str(mailto_cfg).strip() or None,
+        base_url=str(base_url_cfg),
+        per_page=int(per_page_cfg),
+        sleep_s=float(sleep_cfg),
+        timeout_s=int(timeout_cfg),
+        max_retries=int(retries_cfg),
+    )
+
+
+def _parse_doi(value: str) -> str | None:
+    text = value.strip()
+    if not text:
+        return None
+    if text.lower().startswith("https://doi.org/"):
+        text = text[len("https://doi.org/") :]
+    if text.lower().startswith("doi:"):
+        text = text[4:]
+    text = text.strip()
+    if DOI_REGEX.fullmatch(text):
+        return text.lower()
+    return None
+
+
+def _collect_dois(doi_args: list[str], doi_file: str | None) -> list[str]:
+    collected: list[str] = []
+    for item in doi_args:
+        doi = _parse_doi(item)
+        if doi:
+            collected.append(doi)
+    if doi_file:
+        file_path = Path(doi_file)
+        if not file_path.exists():
+            raise FileNotFoundError(f"DOI file not found: {file_path}")
+        for raw in file_path.read_text(encoding="utf-8").splitlines():
+            for piece in raw.split(","):
+                doi = _parse_doi(piece)
+                if doi:
+                    collected.append(doi)
+    return sorted(set(collected))
+
+
+def run_smoke(config_path: Path, db_path_arg: str | None) -> int:
+    LOGGER.info("smoke-run start config=%s db_path_override=%s", config_path, db_path_arg)
+    run_id: int | None = None
+    db_path: Path | None = None
+    try:
+        config = load_config(config_path)
+        db_path = resolve_db_path(db_path_arg, config)
+        init_db(db_path)
+        run_id = create_run(
+            db_path=db_path,
+            job_name="smoke-run",
+            detail=f"config={config_path};db={db_path}",
+        )
+        finish_run(db_path, run_id, "success", "smoke-run completed", _json_stats({"ok": True}))
+        LOGGER.info("smoke-run success run_id=%s db_path=%s", run_id, db_path)
+        return 0
+    except (FileNotFoundError, ValueError) as exc:
+        if run_id is not None and db_path is not None:
+            _mark_run_failed(db_path, run_id, str(exc))
+        LOGGER.error("smoke-run failed: %s", exc)
+        return 1
+    except Exception as exc:
+        if run_id is not None and db_path is not None:
+            _mark_run_failed(db_path, run_id, str(exc))
+        LOGGER.exception("smoke-run unexpected failure")
+        return 1
+
+
+def ingest_dois(args: argparse.Namespace) -> int:
+    config = load_config(Path(args.config))
+    db_path = resolve_db_path(args.db_path, config)
+    init_db(db_path)
+    run_id = create_run(db_path, "ingest-dois", detail=f"config={args.config}")
+
+    client = _build_openalex_client(config)
+    dois = _collect_dois(args.doi, args.doi_file)
+    if not dois:
+        _mark_run_failed(db_path, run_id, "No valid DOI input")
+        LOGGER.error("No valid DOI input")
+        return 1
+
+    inserted = 0
+    failed: list[str] = []
+    status = "failed"
+    detail = ""
+    stats_json = ""
+    try:
+        with connect(db_path) as conn:
+            for doi in dois:
+                try:
+                    work = client.get_work_by_doi(doi)
+                    if not work:
+                        failed.append(doi)
+                        LOGGER.warning("DOI not found in OpenAlex doi=%s", doi)
+                        continue
+                    paper_id = upsert_work(conn, work, source="ingest-dois")
+                    if not args.no_watch:
+                        add_watch_target(conn, target_type="paper", target_value=paper_id, note="seed")
+                    inserted += 1
+                except Exception as exc:
+                    failed.append(doi)
+                    LOGGER.warning("ingest-dois failed doi=%s error=%s", doi, exc)
+        stats = {"input_count": len(dois), "inserted": inserted, "failed": len(failed), "failed_doi": failed}
+        status = "success" if inserted > 0 else "failed"
+        detail = f"inserted={inserted};failed={len(failed)}"
+        stats_json = _json_stats(stats)
+        finish_run(
+            db_path,
+            run_id,
+            status,
+            detail=detail,
+            stats_json=stats_json,
+        )
+        LOGGER.info("ingest-dois done inserted=%s failed=%s", inserted, len(failed))
+        return 0 if inserted > 0 else 1
+    except Exception as exc:
+        _mark_run_failed(db_path, run_id, str(exc))
+        LOGGER.exception("ingest-dois unexpected failure")
+        return 1
+
+
+def _resolve_start_papers(args: argparse.Namespace, db_path: Path) -> list[str]:
+    provided = [canonical_work_id(item) for item in args.start_id]
+    provided_ids = [pid for pid in provided if pid]
+    if provided_ids:
+        return provided_ids
+    with connect(db_path) as conn:
+        return list_seed_paper_ids(conn)
+
+
+def expand_references(args: argparse.Namespace) -> int:
+    config = load_config(Path(args.config))
+    db_path = resolve_db_path(args.db_path, config)
+    init_db(db_path)
+    run_id = create_run(
+        db_path,
+        "expand-references",
+        detail=f"depth={args.depth};max_nodes={args.max_nodes};config={args.config}",
+    )
+
+    start_ids = _resolve_start_papers(args, db_path)
+    if not start_ids:
+        _mark_run_failed(db_path, run_id, "No start papers available")
+        LOGGER.error("No start papers available. Ingest seeds first or pass --start-id.")
+        return 1
+
+    client = _build_openalex_client(config)
+    queue = deque((pid, 0) for pid in start_ids)
+    expanded: set[str] = set()
+    discovered: set[str] = set(start_ids)
+
+    fetched_works = 0
+    edge_attempts = 0
+    try:
+        with connect(db_path) as conn:
+            while queue and len(discovered) <= int(args.max_nodes):
+                paper_id, depth = queue.popleft()
+                if paper_id in expanded:
+                    continue
+                expanded.add(paper_id)
+                try:
+                    work = client.get_work_by_id(paper_id)
+                except Exception as exc:
+                    LOGGER.warning("expand-references fetch failed paper_id=%s error=%s", paper_id, exc)
+                    continue
+
+                fetched_works += 1
+                src_id = upsert_work(conn, work, source="expand-references")
+
+                if depth >= int(args.depth):
+                    continue
+
+                refs = (work.get("referenced_works") or [])[: int(args.max_refs_per_paper)]
+                for ref in refs:
+                    ref_id = canonical_work_id(ref)
+                    if not ref_id:
+                        continue
+                    ensure_paper_stub(conn, ref_id)
+                    add_edge(conn, src_id, ref_id, "references", run_id=run_id)
+                    edge_attempts += 1
+
+                    if ref_id not in discovered and len(discovered) < int(args.max_nodes):
+                        discovered.add(ref_id)
+                        # Only fetch deeper nodes when they still need expansion.
+                        if depth + 1 < int(args.depth):
+                            queue.append((ref_id, depth + 1))
+        stats = {
+            "start_count": len(start_ids),
+            "fetched_works": fetched_works,
+            "expanded_nodes": len(expanded),
+            "discovered_nodes": len(discovered),
+            "edge_attempts": edge_attempts,
+        }
+        finish_run(
+            db_path,
+            run_id,
+            "success",
+            detail=f"expanded={len(expanded)};edges={edge_attempts}",
+            stats_json=_json_stats(stats),
+        )
+        LOGGER.info("expand-references done expanded=%s edge_attempts=%s", len(expanded), edge_attempts)
+        return 0
+    except Exception as exc:
+        _mark_run_failed(db_path, run_id, str(exc))
+        LOGGER.exception("expand-references unexpected failure")
+        return 1
+
+
+def _fallback_from_date(lookback_days: int) -> str:
+    return (date.today() - timedelta(days=max(1, int(lookback_days)))).isoformat()
+
+
+def track_citations(args: argparse.Namespace) -> int:
+    config = load_config(Path(args.config))
+    db_path = resolve_db_path(args.db_path, config)
+    init_db(db_path)
+    run_id = create_run(
+        db_path,
+        "track-citations",
+        detail=f"from_date={args.from_date};lookback_days={args.lookback_days};config={args.config}",
+    )
+    client = _build_openalex_client(config)
+
+    total_citing = 0
+    target_count = 0
+    try:
+        with connect(db_path) as conn:
+            targets = list_watch_targets(conn, target_type="paper")
+            if not targets:
+                _mark_run_failed(db_path, run_id, "No watch targets found")
+                LOGGER.error("No watch targets found. Run ingest-dois first.")
+                return 1
+
+            for target in targets:
+                target_id = str(target["target_value"])
+                from_date = args.from_date or target["last_check_date"] or _fallback_from_date(args.lookback_days)
+                target_count += 1
+                try:
+                    works = client.iter_citing_works(
+                        target_id,
+                        from_publication_date=from_date,
+                        max_pages=int(args.max_pages_per_target),
+                    )
+                    for work in works:
+                        src_id = upsert_work(conn, work, source="track-citations")
+                        add_edge(conn, src_id, target_id, "cites", run_id=run_id)
+                        total_citing += 1
+                    update_watch_target_last_check(conn, "paper", target_id)
+                except Exception as exc:
+                    LOGGER.warning("track-citations failed target=%s error=%s", target_id, exc)
+        stats = {"target_count": target_count, "citing_papers_processed": total_citing}
+        finish_run(
+            db_path,
+            run_id,
+            "success",
+            detail=f"targets={target_count};citing_processed={total_citing}",
+            stats_json=_json_stats(stats),
+        )
+        LOGGER.info("track-citations done targets=%s citing_processed=%s", target_count, total_citing)
+        return 0
+    except Exception as exc:
+        _mark_run_failed(db_path, run_id, str(exc))
+        LOGGER.exception("track-citations unexpected failure")
+        return 1
+
+
+def export_graph(args: argparse.Namespace) -> int:
+    db_path = Path(args.db_path)
+    if not db_path.exists():
+        LOGGER.error("Database file does not exist: %s", db_path)
+        return 1
+
+    out_dir = Path(args.out_dir)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    prefix = str(args.prefix).strip() or "papermap"
+    formats = {item.strip().lower() for item in str(args.formats).split(",") if item.strip()}
+
+    with connect(db_path) as conn:
+        nodes, edges = list_papers_and_edges(conn)
+    LOGGER.info("export-graph source nodes=%s edges=%s", len(nodes), len(edges))
+
+    outputs: list[Path] = []
+    if "json" in formats:
+        outputs.append(export_graph_json(nodes, edges, out_dir / f"{prefix}_{ts}.json"))
+    if "gexf" in formats:
+        outputs.append(export_graph_gexf(nodes, edges, out_dir / f"{prefix}_{ts}.gexf"))
+    if "html" in formats:
+        outputs.append(export_graph_html(nodes, edges, out_dir / f"{prefix}_{ts}.html"))
+
+    if not outputs:
+        LOGGER.error("No valid export format selected. Use json,gexf,html")
+        return 1
+
+    for path in outputs:
+        LOGGER.info("export-graph wrote %s", path)
+    return 0
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    if args.command == "init-db":
+        init_db(Path(args.db_path))
+        return 0
+    if args.command == "smoke-run":
+        return run_smoke(Path(args.config), args.db_path)
+    if args.command == "ingest-dois":
+        return ingest_dois(args)
+    if args.command == "expand-references":
+        return expand_references(args)
+    if args.command == "track-citations":
+        return track_citations(args)
+    if args.command == "export-graph":
+        return export_graph(args)
+
+    parser.error(f"Unsupported command: {args.command}")
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

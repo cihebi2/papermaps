@@ -1,0 +1,10 @@
+# Python caches
+__pycache__/
+*.pyc
+
+# Local runtime data
+data/*.db
+data/*.db*
+outputs/*.json
+outputs/*.gexf
+outputs/*.html

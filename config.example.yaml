@@ -1,0 +1,14 @@
+database:
+  path: data/papermap.db
+
+logging:
+  level: INFO
+
+openalex:
+  base_url: https://api.openalex.org
+  api_key: ${OPENALEX_API_KEY}
+  mailto: your_email@example.com
+  per_page: 200
+  sleep: 0.1
+  timeout_s: 30
+  max_retries: 3
