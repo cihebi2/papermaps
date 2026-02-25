@@ -379,6 +379,45 @@ class TestCliRegression(unittest.TestCase):
             for row in payload["recent_runs"]:
                 self.assertEqual(row["job_name"], "smoke-run")
 
+    def test_report_summary_max_detail_length_truncates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_path = tmp_path / "report_truncate.db"
+            report_path = tmp_path / "summary_truncate.json"
+
+            init_rc = run_cli(["init-db", "--db-path", str(db_path)], ROOT)
+            self.assertEqual(init_rc.returncode, 0, msg=init_rc.stdout + init_rc.stderr)
+
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.execute(
+                    "INSERT INTO runs (job_name, status, detail) VALUES (?, ?, ?)",
+                    ("manual-test", "success", "abcdefghijklmnopqrstuvwxyz"),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            report_rc = run_cli(
+                [
+                    "report-summary",
+                    "--db-path",
+                    str(db_path),
+                    "--out-file",
+                    str(report_path),
+                    "--format",
+                    "json",
+                    "--max-detail-length",
+                    "5",
+                ],
+                ROOT,
+            )
+            self.assertEqual(report_rc.returncode, 0, msg=report_rc.stdout + report_rc.stderr)
+
+            payload = json.loads(report_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["max_detail_length"], 5)
+            self.assertEqual(payload["recent_runs"][0]["detail"], "abcde")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

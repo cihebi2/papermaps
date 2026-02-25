@@ -123,6 +123,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Filter recent runs by job name",
     )
+    report_parser.add_argument(
+        "--max-detail-length",
+        type=int,
+        default=200,
+        help="Maximum detail length in report output",
+    )
 
     export_parser = subparsers.add_parser("export-graph", help="Export paper graph from database")
     export_parser.add_argument("--db-path", default="data/papermap.db", help="SQLite file path")
@@ -510,6 +516,9 @@ def report_summary(args: argparse.Namespace) -> int:
     if int(args.recent_runs) <= 0:
         LOGGER.error("Invalid --recent-runs=%s (must be > 0)", args.recent_runs)
         return 1
+    if int(args.max_detail_length) <= 0:
+        LOGGER.error("Invalid --max-detail-length=%s (must be > 0)", args.max_detail_length)
+        return 1
 
     if args.out_file:
         out_file = Path(args.out_file)
@@ -572,6 +581,15 @@ def report_summary(args: argparse.Namespace) -> int:
                     (int(args.recent_runs),),
                 ).fetchall()
 
+        def truncate_detail(value: str | None) -> str | None:
+            if value is None:
+                return None
+            text = str(value)
+            max_len = int(args.max_detail_length)
+            if len(text) <= max_len:
+                return text
+            return text[:max_len]
+
         payload = {
             "generated_at": datetime.now().isoformat(timespec="seconds"),
             "database": str(db_path),
@@ -589,13 +607,14 @@ def report_summary(args: argparse.Namespace) -> int:
                     "status": row["status"],
                     "started_at": row["started_at"],
                     "finished_at": row["finished_at"],
-                    "detail": row["detail"],
+                    "detail": truncate_detail(row["detail"]),
                 }
                 for row in run_rows
             ],
             "recent_runs_limit": int(args.recent_runs),
             "status_filter": args.status_filter,
             "job_name_filter": args.job_name_filter,
+            "max_detail_length": int(args.max_detail_length),
         }
 
         if args.format == "json":
