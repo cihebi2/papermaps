@@ -636,6 +636,44 @@ class TestCliRegression(unittest.TestCase):
             self.assertEqual(row[1], "success")
             self.assertIn("targets=1", row[2] or "")
 
+    def test_track_citations_dry_run_with_target_id_override(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_path = tmp_path / "track_override.db"
+            config_path = tmp_path / "config.yaml"
+            write_min_config(config_path, db_path)
+
+            init_rc = run_cli(["init-db", "--db-path", str(db_path)], ROOT)
+            self.assertEqual(init_rc.returncode, 0, msg=init_rc.stdout + init_rc.stderr)
+
+            track_rc = run_cli(
+                [
+                    "track-citations",
+                    "--config",
+                    str(config_path),
+                    "--db-path",
+                    str(db_path),
+                    "--dry-run",
+                    "--target-id",
+                    "W1234567890",
+                ],
+                ROOT,
+            )
+            self.assertEqual(track_rc.returncode, 0, msg=track_rc.stdout + track_rc.stderr)
+
+            conn = sqlite3.connect(db_path)
+            try:
+                row = conn.execute(
+                    "SELECT job_name, status, detail FROM runs ORDER BY id DESC LIMIT 1"
+                ).fetchone()
+            finally:
+                conn.close()
+
+            self.assertIsNotNone(row)
+            self.assertEqual(row[0], "track-citations")
+            self.assertEqual(row[1], "success")
+            self.assertIn("targets=1", row[2] or "")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

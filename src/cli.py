@@ -86,6 +86,7 @@ def build_parser() -> argparse.ArgumentParser:
     track_parser.add_argument("--lookback-days", type=int, default=30, help="Fallback window when watch has no cursor")
     track_parser.add_argument("--max-pages-per-target", type=int, default=3, help="OpenAlex pages per target paper")
     track_parser.add_argument("--dry-run", action="store_true", help="Validate tracking loop without API calls")
+    track_parser.add_argument("--target-id", action="append", default=[], help="Specific OpenAlex work id(s) to track")
 
     scheduler_parser = subparsers.add_parser(
         "run-scheduler",
@@ -417,15 +418,26 @@ def track_citations(args: argparse.Namespace) -> int:
     target_count = 0
     try:
         with connect(db_path) as conn:
-            targets = list_watch_targets(conn, target_type="paper")
-            if not targets:
-                _mark_run_failed(db_path, run_id, "No watch targets found")
-                LOGGER.error("No watch targets found. Run ingest-dois first.")
-                return 1
+            specified_targets = [canonical_work_id(item) for item in (args.target_id or [])]
+            specified_targets = [item for item in specified_targets if item]
+            using_watch_targets = len(specified_targets) == 0
 
-            for target in targets:
-                target_id = str(target["target_value"])
-                from_date = args.from_date or target["last_check_date"] or _fallback_from_date(args.lookback_days)
+            if using_watch_targets:
+                targets = list_watch_targets(conn, target_type="paper")
+                if not targets:
+                    _mark_run_failed(db_path, run_id, "No watch targets found")
+                    LOGGER.error("No watch targets found. Run ingest-dois first or pass --target-id.")
+                    return 1
+                target_values = [str(target["target_value"]) for target in targets]
+            else:
+                target_values = list(dict.fromkeys(specified_targets))
+
+            for target_id in target_values:
+                from_date = args.from_date or _fallback_from_date(args.lookback_days)
+                if using_watch_targets:
+                    watch_row = next((w for w in targets if str(w["target_value"]) == target_id), None)
+                    if watch_row is not None:
+                        from_date = args.from_date or watch_row["last_check_date"] or _fallback_from_date(args.lookback_days)
                 target_count += 1
                 try:
                     if bool(args.dry_run):
@@ -444,7 +456,8 @@ def track_citations(args: argparse.Namespace) -> int:
                             src_id = upsert_work(conn, work, source="track-citations")
                             add_edge(conn, src_id, target_id, "cites", run_id=run_id)
                             total_citing += 1
-                        update_watch_target_last_check(conn, "paper", target_id)
+                        if using_watch_targets:
+                            update_watch_target_last_check(conn, "paper", target_id)
                 except Exception as exc:
                     LOGGER.warning("track-citations failed target=%s error=%s", target_id, exc)
         stats = {"target_count": target_count, "citing_papers_processed": total_citing}
