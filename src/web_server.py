@@ -13,11 +13,19 @@ from urllib.parse import parse_qs, urlparse
 try:
     from .db_init import init_db
     from .openalex_client import OpenAlexClient, canonical_work_id
-    from .storage import add_watch_target, connect, get_app_setting, list_watch_targets, set_app_setting, upsert_work
+    from .storage import (
+        add_edge,
+        add_watch_target,
+        connect,
+        get_app_setting,
+        list_watch_targets,
+        set_app_setting,
+        upsert_work,
+    )
 except ImportError:
     from db_init import init_db
     from openalex_client import OpenAlexClient, canonical_work_id
-    from storage import add_watch_target, connect, get_app_setting, list_watch_targets, set_app_setting, upsert_work
+    from storage import add_edge, add_watch_target, connect, get_app_setting, list_watch_targets, set_app_setting, upsert_work
 
 LOGGER = logging.getLogger(__name__)
 DOI_REGEX = re.compile(r"10\.\d{4,9}/[-._;()/:A-Za-z0-9]+$")
@@ -179,6 +187,24 @@ INDEX_HTML = """<!doctype html>
         <div id="doiBatchResult" class="sub">No batch search yet.</div>
       </div>
     </section>
+    <section class="panel">
+      <h2>Related Papers</h2>
+      <div style="padding:12px 14px; display:grid; grid-template-columns: 120px 1fr; gap:10px; align-items:start;">
+        <label for="relatedDoiInput">Seed DOI</label>
+        <input id="relatedDoiInput" type="text" placeholder="10.xxxx/...">
+        <label for="maxReferencesInput">Max references</label>
+        <input id="maxReferencesInput" type="number" min="1" max="20" value="5">
+        <label for="maxCitingInput">Max citing</label>
+        <input id="maxCitingInput" type="number" min="1" max="20" value="5">
+        <span></span>
+        <div>
+          <label><input id="saveRelatedData" type="checkbox" checked> Save related data</label>
+          <button id="relatedBtn" type="button">Explore Related</button>
+        </div>
+        <label>Related Result</label>
+        <div id="relatedResult" class="sub">No related search yet.</div>
+      </div>
+    </section>
     <div id="error" class="error"></div>
     <div class="grid" id="cards"></div>
     <section class="panel">
@@ -212,6 +238,12 @@ INDEX_HTML = """<!doctype html>
     const saveWatchOnBatch = document.getElementById("saveWatchOnBatch");
     const searchDoiBatchBtn = document.getElementById("searchDoiBatchBtn");
     const doiBatchResult = document.getElementById("doiBatchResult");
+    const relatedDoiInput = document.getElementById("relatedDoiInput");
+    const maxReferencesInput = document.getElementById("maxReferencesInput");
+    const maxCitingInput = document.getElementById("maxCitingInput");
+    const saveRelatedData = document.getElementById("saveRelatedData");
+    const relatedBtn = document.getElementById("relatedBtn");
+    const relatedResult = document.getElementById("relatedResult");
     let timer = null;
 
     function esc(v) {
@@ -401,6 +433,44 @@ INDEX_HTML = """<!doctype html>
       }
     }
 
+    async function exploreRelated() {
+      relatedResult.textContent = "";
+      const doi = relatedDoiInput.value.trim();
+      if (!doi) {
+        relatedResult.textContent = "Please fill seed DOI.";
+        return;
+      }
+      const maxReferences = Math.max(1, Number(maxReferencesInput.value || 5));
+      const maxCiting = Math.max(1, Number(maxCitingInput.value || 5));
+      try {
+        const res = await fetch("/api/works/related", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            doi,
+            max_references: maxReferences,
+            max_citing: maxCiting,
+            save: Boolean(saveRelatedData.checked),
+          }),
+        });
+        const payload = await res.json();
+        if (!res.ok) throw new Error(payload.error || `HTTP ${res.status}`);
+        const seed = payload.seed || {};
+        const refs = payload.references || [];
+        const citing = payload.citing || [];
+        const lines = [];
+        lines.push(`Seed: ${seed.paper_id || "-"} ${seed.title || "-"}`);
+        lines.push(`References: ${refs.length}`);
+        for (const x of refs) lines.push(`- REF ${x.paper_id || "-"} ${x.title || "-"}`);
+        lines.push(`Citing: ${citing.length}`);
+        for (const x of citing) lines.push(`- CIT ${x.paper_id || "-"} ${x.title || "-"}`);
+        relatedResult.innerHTML = lines.map((x) => esc(x)).join("<br>");
+        await loadData();
+      } catch (err) {
+        relatedResult.textContent = `Related search failed: ${err}`;
+      }
+    }
+
     function startTimer() {
       if (timer) clearInterval(timer);
       if (autoRefresh.checked) {
@@ -412,6 +482,7 @@ INDEX_HTML = """<!doctype html>
     saveSettingsBtn.addEventListener("click", saveOpenAlexSettings);
     searchDoiBtn.addEventListener("click", searchByDoi);
     searchDoiBatchBtn.addEventListener("click", searchByDoiBatch);
+    relatedBtn.addEventListener("click", exploreRelated);
     autoRefresh.addEventListener("change", startTimer);
     recentRunsInput.addEventListener("change", loadData);
     loadOpenAlexSettings();
@@ -528,6 +599,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api/works/resolve-dois":
                 self._handle_post_resolve_dois()
+                LOGGER.info("web request success method=POST path=%s", parsed.path)
+                return
+            if parsed.path == "/api/works/related":
+                self._handle_post_related_works()
                 LOGGER.info("web request success method=POST path=%s", parsed.path)
                 return
             self._send_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
@@ -701,6 +776,90 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "requested": len(cleaned),
                 "found": found,
                 "failed": failed,
+            },
+            HTTPStatus.OK,
+        )
+
+    def _handle_post_related_works(self) -> None:
+        body = self._read_json_body()
+        if body is None:
+            return
+        doi = self._normalize_doi(str(body.get("doi", "")))
+        if not doi:
+            self._send_json({"error": "Invalid DOI"}, HTTPStatus.BAD_REQUEST)
+            return
+
+        try:
+            max_references = max(1, int(body.get("max_references", 5)))
+            max_citing = max(1, int(body.get("max_citing", 5)))
+        except ValueError:
+            self._send_json({"error": "max_references/max_citing must be integer"}, HTTPStatus.BAD_REQUEST)
+            return
+        save = bool(body.get("save", True))
+
+        client = self._build_openalex_client()
+        seed_work = client.get_work_by_doi(doi)
+        if not seed_work:
+            self._send_json({"error": "Seed DOI not found"}, HTTPStatus.NOT_FOUND)
+            return
+        seed_id = canonical_work_id(seed_work.get("id"))
+        if not seed_id:
+            self._send_json({"error": "Seed work has invalid id"}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+
+        references: list[dict[str, Any]] = []
+        citing: list[dict[str, Any]] = []
+        reference_ids: list[str] = []
+        for raw in (seed_work.get("referenced_works") or []):
+            rid = canonical_work_id(raw)
+            if rid:
+                reference_ids.append(rid)
+            if len(reference_ids) >= max_references:
+                break
+
+        conn = connect(self.db_path)
+        try:
+            if save:
+                upsert_work(conn, seed_work, source="web-related-seed")
+                add_watch_target(
+                    conn,
+                    target_type="paper",
+                    target_value=seed_id,
+                    enabled=1,
+                    note=f"web related seed doi:{doi}",
+                )
+            for rid in reference_ids:
+                try:
+                    ref_work = client.get_work_by_id(rid)
+                except Exception:
+                    continue
+                references.append(self._serialize_work(ref_work))
+                if save:
+                    upsert_work(conn, ref_work, source="web-related-reference")
+                    add_edge(conn, seed_id, rid, "references")
+
+            cited_count = 0
+            for work in client.iter_citing_works(seed_id, max_pages=3):
+                citing.append(self._serialize_work(work))
+                if save:
+                    c_id = upsert_work(conn, work, source="web-related-citing")
+                    if c_id:
+                        add_edge(conn, c_id, seed_id, "cites")
+                cited_count += 1
+                if cited_count >= max_citing:
+                    break
+            if save:
+                conn.commit()
+        finally:
+            conn.close()
+
+        self._send_json(
+            {
+                "ok": True,
+                "seed": self._serialize_work(seed_work),
+                "references": references,
+                "citing": citing,
+                "save": save,
             },
             HTTPStatus.OK,
         )

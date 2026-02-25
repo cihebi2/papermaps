@@ -434,6 +434,135 @@ class TestCliRegression(unittest.TestCase):
             self.assertEqual(papers, 2)
             self.assertEqual(watches, 2)
 
+    def test_web_related_works_returns_references_and_citing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_path = tmp_path / "web_related.db"
+
+            init_rc = run_cli(["init-db", "--db-path", str(db_path)], ROOT)
+            self.assertEqual(init_rc.returncode, 0, msg=init_rc.stdout + init_rc.stderr)
+
+            class _FakeClient:
+                def get_work_by_doi(self, doi: str) -> dict[str, object] | None:
+                    if doi != "10.1000/seed":
+                        return None
+                    return {
+                        "id": "https://openalex.org/WSEED",
+                        "title": "Seed Work",
+                        "doi": "https://doi.org/10.1000/seed",
+                        "publication_date": "2024-01-01",
+                        "referenced_works": ["https://openalex.org/WREF1", "WREF2"],
+                        "primary_location": {"source": {"display_name": "Seed Journal"}},
+                    }
+
+                def get_work_by_id(self, work_id: str) -> dict[str, object]:
+                    return {
+                        "id": f"https://openalex.org/{work_id}",
+                        "title": f"Ref {work_id}",
+                        "doi": None,
+                        "publication_date": "2020-01-01",
+                        "primary_location": {"source": {"display_name": "Ref Journal"}},
+                    }
+
+                def iter_citing_works(self, target_work_id: str, **kwargs: object):
+                    yield {
+                        "id": "https://openalex.org/WCIT1",
+                        "title": "Citing One",
+                        "doi": "https://doi.org/10.1000/c1",
+                        "publication_date": "2025-01-01",
+                        "primary_location": {"source": {"display_name": "Citing Journal"}},
+                    }
+                    yield {
+                        "id": "https://openalex.org/WCIT2",
+                        "title": "Citing Two",
+                        "doi": "https://doi.org/10.1000/c2",
+                        "publication_date": "2025-01-02",
+                        "primary_location": {"source": {"display_name": "Citing Journal"}},
+                    }
+
+            from src.web_server import create_http_server
+
+            with mock.patch("src.web_server.OpenAlexClient", return_value=_FakeClient()):
+                server = create_http_server(db_path, host="127.0.0.1", port=0, default_recent_runs=5)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    port = int(server.server_address[1])
+                    url = f"http://127.0.0.1:{port}/api/works/related"
+                    body = json.dumps(
+                        {
+                            "doi": "10.1000/seed",
+                            "max_references": 2,
+                            "max_citing": 1,
+                            "save": True,
+                        }
+                    ).encode("utf-8")
+                    req = urllib.request.Request(
+                        url,
+                        data=body,
+                        method="POST",
+                        headers={"Content-Type": "application/json"},
+                    )
+                    with urllib.request.urlopen(req, timeout=2) as response:
+                        self.assertEqual(response.status, 200)
+                        payload = json.loads(response.read().decode("utf-8"))
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    thread.join(timeout=5)
+
+            self.assertEqual(payload["seed"]["paper_id"], "WSEED")
+            self.assertEqual(len(payload["references"]), 2)
+            self.assertEqual(len(payload["citing"]), 1)
+
+            conn = sqlite3.connect(db_path)
+            try:
+                edge_refs = int(
+                    conn.execute(
+                        "SELECT COUNT(*) FROM edges WHERE src_paper_id='WSEED' AND relation='references'"
+                    ).fetchone()[0]
+                )
+                edge_cites = int(
+                    conn.execute(
+                        "SELECT COUNT(*) FROM edges WHERE dst_paper_id='WSEED' AND relation='cites'"
+                    ).fetchone()[0]
+                )
+            finally:
+                conn.close()
+            self.assertGreaterEqual(edge_refs, 2)
+            self.assertGreaterEqual(edge_cites, 1)
+
+    def test_web_related_works_invalid_doi_returns_400(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_path = tmp_path / "web_related_invalid.db"
+
+            init_rc = run_cli(["init-db", "--db-path", str(db_path)], ROOT)
+            self.assertEqual(init_rc.returncode, 0, msg=init_rc.stdout + init_rc.stderr)
+
+            from src.web_server import create_http_server
+
+            server = create_http_server(db_path, host="127.0.0.1", port=0, default_recent_runs=5)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                port = int(server.server_address[1])
+                url = f"http://127.0.0.1:{port}/api/works/related"
+                body = json.dumps({"doi": "bad", "max_references": 2, "max_citing": 1, "save": True}).encode("utf-8")
+                req = urllib.request.Request(
+                    url,
+                    data=body,
+                    method="POST",
+                    headers={"Content-Type": "application/json"},
+                )
+                with self.assertRaises(urllib.error.HTTPError) as cm:
+                    urllib.request.urlopen(req, timeout=2)
+                self.assertEqual(cm.exception.code, 400)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
     def test_smoke_run_success_writes_run_row(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
