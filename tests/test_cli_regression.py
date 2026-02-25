@@ -493,6 +493,32 @@ class TestCliRegression(unittest.TestCase):
             self.assertIn("job-new", job_names)
             self.assertNotIn("job-old", job_names)
 
+    def test_report_summary_started_after_invalid_date_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_path = tmp_path / "report_started_after_invalid.db"
+            report_path = tmp_path / "summary_started_after_invalid.json"
+
+            init_rc = run_cli(["init-db", "--db-path", str(db_path)], ROOT)
+            self.assertEqual(init_rc.returncode, 0, msg=init_rc.stdout + init_rc.stderr)
+
+            result = run_cli(
+                [
+                    "report-summary",
+                    "--db-path",
+                    str(db_path),
+                    "--out-file",
+                    str(report_path),
+                    "--format",
+                    "json",
+                    "--started-after",
+                    "2026-99-99",
+                ],
+                ROOT,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("invalid --started-after", result.stderr.lower() + result.stdout.lower())
+
     def test_report_summary_max_detail_length_truncates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
