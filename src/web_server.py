@@ -8,6 +8,8 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+import threading
+import time
 from urllib.parse import parse_qs, urlparse
 import urllib.request
 
@@ -272,6 +274,26 @@ INDEX_HTML = """<!doctype html>
       </div>
     </section>
     <section class="panel">
+      <h2>Auto Scan Worker</h2>
+      <div style="padding:12px 14px; display:grid; grid-template-columns: 170px 1fr; gap:10px; align-items:center;">
+        <label for="autoscanEnabled">Enabled</label>
+        <label><input id="autoscanEnabled" type="checkbox"> Run scan in background</label>
+        <label for="autoscanIntervalInput">Interval seconds</label>
+        <input id="autoscanIntervalInput" type="number" min="1" max="86400" value="300">
+        <label for="autoscanLookbackInput">Lookback days</label>
+        <input id="autoscanLookbackInput" type="number" min="1" max="365" value="30">
+        <label for="autoscanPagesInput">Pages per target</label>
+        <input id="autoscanPagesInput" type="number" min="1" max="20" value="1">
+        <label for="autoscanPushNew">Push after scan</label>
+        <label><input id="autoscanPushNew" type="checkbox" checked> Push new alerts to webhook</label>
+        <span></span>
+        <div>
+          <button id="saveAutoscanBtn" type="button">Save Auto Scan Config</button>
+          <span id="autoscanStatus" class="sub" style="margin-left:10px;"></span>
+        </div>
+      </div>
+    </section>
+    <section class="panel">
       <h2>Notification Push (Webhook)</h2>
       <div style="padding:12px 14px; display:grid; grid-template-columns: 170px 1fr; gap:10px; align-items:center;">
         <label for="webhookUrlInput">Webhook URL</label>
@@ -335,6 +357,13 @@ INDEX_HTML = """<!doctype html>
     const scanPagesInput = document.getElementById("scanPagesInput");
     const scanLatestBtn = document.getElementById("scanLatestBtn");
     const scanLatestStatus = document.getElementById("scanLatestStatus");
+    const autoscanEnabled = document.getElementById("autoscanEnabled");
+    const autoscanIntervalInput = document.getElementById("autoscanIntervalInput");
+    const autoscanLookbackInput = document.getElementById("autoscanLookbackInput");
+    const autoscanPagesInput = document.getElementById("autoscanPagesInput");
+    const autoscanPushNew = document.getElementById("autoscanPushNew");
+    const saveAutoscanBtn = document.getElementById("saveAutoscanBtn");
+    const autoscanStatus = document.getElementById("autoscanStatus");
     const webhookUrlInput = document.getElementById("webhookUrlInput");
     const saveWebhookBtn = document.getElementById("saveWebhookBtn");
     const pushAlertsBtn = document.getElementById("pushAlertsBtn");
@@ -652,6 +681,51 @@ INDEX_HTML = """<!doctype html>
       }
     }
 
+    async function loadAutoscanConfig() {
+      autoscanStatus.textContent = "";
+      try {
+        const res = await fetch("/api/autoscan/config", { cache: "no-store" });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const payload = await res.json();
+        autoscanEnabled.checked = Boolean(payload.enabled);
+        autoscanIntervalInput.value = String(payload.interval_seconds || 300);
+        autoscanLookbackInput.value = String(payload.lookback_days || 30);
+        autoscanPagesInput.value = String(payload.max_pages_per_target || 1);
+        autoscanPushNew.checked = Boolean(payload.push_new);
+        autoscanStatus.textContent = payload.last_run_at ? `last_run_at=${payload.last_run_at}` : "Not run yet";
+      } catch (err) {
+        autoscanStatus.textContent = `Load config failed: ${err}`;
+      }
+    }
+
+    async function saveAutoscanConfig() {
+      autoscanStatus.textContent = "";
+      const intervalSeconds = Math.max(1, Number(autoscanIntervalInput.value || 300));
+      const lookbackDays = Math.max(1, Number(autoscanLookbackInput.value || 30));
+      const pages = Math.max(1, Number(autoscanPagesInput.value || 1));
+      autoscanIntervalInput.value = String(intervalSeconds);
+      autoscanLookbackInput.value = String(lookbackDays);
+      autoscanPagesInput.value = String(pages);
+      try {
+        const res = await fetch("/api/autoscan/config", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            enabled: Boolean(autoscanEnabled.checked),
+            interval_seconds: intervalSeconds,
+            lookback_days: lookbackDays,
+            max_pages_per_target: pages,
+            push_new: Boolean(autoscanPushNew.checked),
+          }),
+        });
+        const payload = await res.json();
+        if (!res.ok) throw new Error(payload.error || `HTTP ${res.status}`);
+        autoscanStatus.textContent = "Auto scan config saved";
+      } catch (err) {
+        autoscanStatus.textContent = `Save config failed: ${err}`;
+      }
+    }
+
     async function loadWebhookConfig() {
       pushStatus.textContent = "";
       try {
@@ -714,6 +788,7 @@ INDEX_HTML = """<!doctype html>
     similarBtn.addEventListener("click", findSimilarThemes);
     savedRefreshBtn.addEventListener("click", loadSavedSearches);
     scanLatestBtn.addEventListener("click", runLatestScan);
+    saveAutoscanBtn.addEventListener("click", saveAutoscanConfig);
     saveWebhookBtn.addEventListener("click", saveWebhookConfig);
     pushAlertsBtn.addEventListener("click", pushNewAlerts);
     autoRefresh.addEventListener("change", startTimer);
@@ -721,6 +796,7 @@ INDEX_HTML = """<!doctype html>
     loadOpenAlexSettings();
     loadData();
     loadSavedSearches();
+    loadAutoscanConfig();
     loadWebhookConfig();
     startTimer();
   </script>
@@ -795,6 +871,243 @@ def build_dashboard_payload(db_path: Path, recent_runs: int, watch_limit: int = 
     }
 
 
+def _build_openalex_client_from_db(db_path: Path) -> OpenAlexClient:
+    conn = connect(db_path)
+    try:
+        api_key = get_app_setting(conn, "openalex.api_key", default=None)
+        mailto = get_app_setting(conn, "openalex.mailto", default=None)
+    finally:
+        conn.close()
+    return OpenAlexClient(api_key=api_key, mailto=mailto)
+
+
+def _fallback_from_date(lookback_days: int) -> str:
+    return (date.today() - timedelta(days=max(1, int(lookback_days)))).isoformat()
+
+
+def _parse_int_setting(value: str | None, default: int, *, minimum: int = 0) -> int:
+    if value is None or str(value).strip() == "":
+        return default
+    try:
+        out = int(value)
+    except ValueError:
+        return default
+    return out if out >= minimum else default
+
+
+def _parse_bool_setting(value: str | None, default: bool = False) -> bool:
+    if value is None:
+        return default
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def get_autoscan_config(db_path: Path) -> dict[str, Any]:
+    conn = connect(db_path)
+    try:
+        enabled = _parse_bool_setting(get_app_setting(conn, "autoscan.enabled", default="0"), default=False)
+        interval_seconds = _parse_int_setting(
+            get_app_setting(conn, "autoscan.interval_seconds", default="300"),
+            default=300,
+            minimum=1,
+        )
+        lookback_days = _parse_int_setting(
+            get_app_setting(conn, "autoscan.lookback_days", default="30"),
+            default=30,
+            minimum=1,
+        )
+        max_pages_per_target = _parse_int_setting(
+            get_app_setting(conn, "autoscan.max_pages_per_target", default="1"),
+            default=1,
+            minimum=1,
+        )
+        push_new = _parse_bool_setting(get_app_setting(conn, "autoscan.push_new", default="1"), default=True)
+        last_run_at = get_app_setting(conn, "autoscan.last_run_at", default=None)
+    finally:
+        conn.close()
+    return {
+        "enabled": enabled,
+        "interval_seconds": interval_seconds,
+        "lookback_days": lookback_days,
+        "max_pages_per_target": max_pages_per_target,
+        "push_new": push_new,
+        "last_run_at": last_run_at,
+    }
+
+
+def set_autoscan_config(
+    db_path: Path,
+    *,
+    enabled: bool,
+    interval_seconds: int,
+    lookback_days: int,
+    max_pages_per_target: int,
+    push_new: bool,
+) -> dict[str, Any]:
+    conn = connect(db_path)
+    try:
+        set_app_setting(conn, "autoscan.enabled", "1" if enabled else "0")
+        set_app_setting(conn, "autoscan.interval_seconds", str(int(interval_seconds)))
+        set_app_setting(conn, "autoscan.lookback_days", str(int(lookback_days)))
+        set_app_setting(conn, "autoscan.max_pages_per_target", str(int(max_pages_per_target)))
+        set_app_setting(conn, "autoscan.push_new", "1" if push_new else "0")
+        conn.commit()
+    finally:
+        conn.close()
+    return get_autoscan_config(db_path)
+
+
+def latest_scan_core(db_path: Path, *, lookback_days: int, max_pages_per_target: int) -> dict[str, Any]:
+    client = _build_openalex_client_from_db(db_path)
+    targets_scanned = 0
+    citing_processed = 0
+    alerts_new = 0
+
+    conn = connect(db_path)
+    try:
+        targets = list_watch_targets(conn, target_type="paper", include_disabled=False, limit=1000)
+        for target in targets:
+            target_id = str(target["target_value"])
+            watch_target_id = int(target["id"])
+            from_date = target["last_check_date"] or _fallback_from_date(lookback_days)
+            targets_scanned += 1
+            try:
+                for work in client.iter_citing_works(
+                    target_id,
+                    from_publication_date=str(from_date),
+                    max_pages=max_pages_per_target,
+                ):
+                    citing_id = upsert_work(conn, work, source="web-latest-scan")
+                    add_edge(conn, citing_id, target_id, "cites")
+                    alert_id, created = add_alert_if_new(
+                        conn,
+                        watch_target_id=watch_target_id,
+                        paper_id=citing_id,
+                        alert_type="new_citation",
+                        status="new",
+                        payload_json=json.dumps(
+                            {
+                                "paper_id": citing_id,
+                                "title": work.get("title") or work.get("display_name"),
+                                "doi": str(work.get("doi") or "").replace("https://doi.org/", "") or None,
+                            },
+                            ensure_ascii=False,
+                        ),
+                    )
+                    if alert_id and created:
+                        alerts_new += 1
+                    citing_processed += 1
+                update_watch_target_last_check(conn, "paper", target_id)
+            except Exception as exc:
+                LOGGER.warning("latest-scan failed target=%s error=%s", target_id, exc)
+        conn.commit()
+    finally:
+        conn.close()
+
+    return {
+        "targets_scanned": targets_scanned,
+        "citing_papers_processed": citing_processed,
+        "alerts_new": alerts_new,
+        "lookback_days": lookback_days,
+        "max_pages_per_target": max_pages_per_target,
+    }
+
+
+def _send_webhook_post(url: str, payload: dict[str, Any]) -> tuple[bool, str | None]:
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(
+        url=url,
+        data=data,
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=8) as response:
+            status = int(response.status)
+        if 200 <= status < 300:
+            return True, None
+        return False, f"HTTP {status}"
+    except Exception as exc:
+        return False, str(exc)
+
+
+def push_new_alerts_core(db_path: Path, *, limit: int = 50) -> dict[str, Any]:
+    conn = connect(db_path)
+    try:
+        webhooks = list_notification_targets(conn, target_type="webhook", include_disabled=False, limit=20)
+        alerts = list_alerts(conn, status="new", limit=max(1, int(limit)))
+        if not webhooks:
+            return {"alerts_considered": len(alerts), "pushed": 0, "failed": len(alerts), "errors": ["No webhook configured"]}
+
+        pushed = 0
+        failed = 0
+        errors: list[str] = []
+        for alert in alerts:
+            payload = {
+                "alert_id": int(alert["id"]),
+                "watch_target_id": int(alert["watch_target_id"]),
+                "paper_id": alert["paper_id"],
+                "alert_type": alert["alert_type"],
+                "status": alert["status"],
+                "payload": json.loads(alert["payload_json"]) if alert["payload_json"] else None,
+                "created_at": alert["created_at"],
+            }
+            sent = False
+            for webhook in webhooks:
+                ok, err = _send_webhook_post(str(webhook["target_value"]), payload)
+                if ok:
+                    sent = True
+                elif err:
+                    errors.append(err)
+            if sent:
+                mark_alert_pushed(conn, int(alert["id"]))
+                pushed += 1
+            else:
+                failed += 1
+        conn.commit()
+        return {"alerts_considered": len(alerts), "pushed": pushed, "failed": failed, "errors": errors[:10]}
+    finally:
+        conn.close()
+
+
+def _auto_scan_loop(db_path: Path, stop_event: threading.Event) -> None:
+    last_tick = 0.0
+    while not stop_event.wait(1.0):
+        cfg = get_autoscan_config(db_path)
+        if not cfg["enabled"]:
+            continue
+        now = time.time()
+        if now - last_tick < int(cfg["interval_seconds"]):
+            continue
+        last_tick = now
+        try:
+            scan_result = latest_scan_core(
+                db_path,
+                lookback_days=int(cfg["lookback_days"]),
+                max_pages_per_target=int(cfg["max_pages_per_target"]),
+            )
+            push_result: dict[str, Any] | None = None
+            if bool(cfg["push_new"]):
+                push_result = push_new_alerts_core(db_path, limit=100)
+            conn = connect(db_path)
+            try:
+                set_app_setting(conn, "autoscan.last_run_at", datetime.now().isoformat(timespec="seconds"))
+                set_app_setting(
+                    conn,
+                    "autoscan.last_result",
+                    json.dumps({"scan": scan_result, "push": push_result}, ensure_ascii=False),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception as exc:
+            LOGGER.warning("autoscan loop failed error=%s", exc)
+
+
 class DashboardHandler(BaseHTTPRequestHandler):
     db_path: Path = Path("data/papermap.db")
     default_recent_runs: int = 20
@@ -813,6 +1126,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api/settings/openalex":
                 self._handle_get_openalex_settings()
+                LOGGER.info("web request success path=%s", parsed.path)
+                return
+            if parsed.path == "/api/autoscan/config":
+                self._handle_get_autoscan_config()
                 LOGGER.info("web request success path=%s", parsed.path)
                 return
             if parsed.path == "/api/saved-searches":
@@ -834,6 +1151,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
         try:
             if parsed.path == "/api/settings/openalex":
                 self._handle_post_openalex_settings()
+                LOGGER.info("web request success method=POST path=%s", parsed.path)
+                return
+            if parsed.path == "/api/autoscan/config":
+                self._handle_post_autoscan_config()
                 LOGGER.info("web request success method=POST path=%s", parsed.path)
                 return
             if parsed.path == "/api/works/resolve-doi":
@@ -911,6 +1232,44 @@ class DashboardHandler(BaseHTTPRequestHandler):
         finally:
             conn.close()
         self._send_json({"ok": True, "api_key_set": bool(api_key), "mailto": mailto}, HTTPStatus.OK)
+
+    def _handle_get_autoscan_config(self) -> None:
+        cfg = get_autoscan_config(self.db_path)
+        self._send_json(cfg, HTTPStatus.OK)
+
+    def _handle_post_autoscan_config(self) -> None:
+        body = self._read_json_body()
+        if body is None:
+            return
+
+        current = get_autoscan_config(self.db_path)
+        enabled = _parse_bool_setting(str(body.get("enabled", current["enabled"])), default=bool(current["enabled"]))
+        push_new = _parse_bool_setting(str(body.get("push_new", current["push_new"])), default=bool(current["push_new"]))
+        try:
+            interval_seconds = int(body.get("interval_seconds", current["interval_seconds"]))
+            lookback_days = int(body.get("lookback_days", current["lookback_days"]))
+            max_pages_per_target = int(body.get("max_pages_per_target", current["max_pages_per_target"]))
+        except (TypeError, ValueError):
+            self._send_json(
+                {"error": "interval_seconds/lookback_days/max_pages_per_target must be integer"},
+                HTTPStatus.BAD_REQUEST,
+            )
+            return
+        if interval_seconds <= 0 or lookback_days <= 0 or max_pages_per_target <= 0:
+            self._send_json(
+                {"error": "interval_seconds/lookback_days/max_pages_per_target must be > 0"},
+                HTTPStatus.BAD_REQUEST,
+            )
+            return
+        cfg = set_autoscan_config(
+            self.db_path,
+            enabled=bool(enabled),
+            interval_seconds=interval_seconds,
+            lookback_days=lookback_days,
+            max_pages_per_target=max_pages_per_target,
+            push_new=bool(push_new),
+        )
+        self._send_json({"ok": True, **cfg}, HTTPStatus.OK)
 
     def _normalize_doi(self, value: str) -> str | None:
         text = str(value).strip().lower()
@@ -1287,9 +1646,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
             HTTPStatus.OK,
         )
 
-    def _fallback_from_date(self, lookback_days: int) -> str:
-        return (date.today() - timedelta(days=max(1, int(lookback_days)))).isoformat()
-
     def _handle_post_latest_scan(self) -> None:
         body = self._read_json_body()
         if body is None:
@@ -1297,119 +1653,18 @@ class DashboardHandler(BaseHTTPRequestHandler):
         try:
             lookback_days = max(1, int(body.get("lookback_days", 30)))
             max_pages_per_target = int(body.get("max_pages_per_target", 1))
-        except ValueError:
+        except (TypeError, ValueError):
             self._send_json({"error": "lookback_days/max_pages_per_target must be integer"}, HTTPStatus.BAD_REQUEST)
             return
         if max_pages_per_target <= 0:
             self._send_json({"error": "max_pages_per_target must be > 0"}, HTTPStatus.BAD_REQUEST)
             return
-
-        client = self._build_openalex_client()
-        targets_scanned = 0
-        citing_processed = 0
-        alerts_new = 0
-
-        conn = connect(self.db_path)
-        try:
-            targets = list_watch_targets(conn, target_type="paper", include_disabled=False, limit=1000)
-            for target in targets:
-                target_id = str(target["target_value"])
-                watch_target_id = int(target["id"])
-                from_date = target["last_check_date"] or self._fallback_from_date(lookback_days)
-                targets_scanned += 1
-                try:
-                    for work in client.iter_citing_works(
-                        target_id,
-                        from_publication_date=str(from_date),
-                        max_pages=max_pages_per_target,
-                    ):
-                        citing_id = upsert_work(conn, work, source="web-latest-scan")
-                        add_edge(conn, citing_id, target_id, "cites")
-                        alert_id, created = add_alert_if_new(
-                            conn,
-                            watch_target_id=watch_target_id,
-                            paper_id=citing_id,
-                            alert_type="new_citation",
-                            status="new",
-                            payload_json=json.dumps(self._serialize_work(work), ensure_ascii=False),
-                        )
-                        if alert_id and created:
-                            alerts_new += 1
-                        citing_processed += 1
-                    update_watch_target_last_check(conn, "paper", target_id)
-                except Exception as exc:
-                    LOGGER.warning("latest-scan failed target=%s error=%s", target_id, exc)
-            conn.commit()
-        finally:
-            conn.close()
-
-        self._send_json(
-            {
-                "ok": True,
-                "targets_scanned": targets_scanned,
-                "citing_papers_processed": citing_processed,
-                "alerts_new": alerts_new,
-                "lookback_days": lookback_days,
-                "max_pages_per_target": max_pages_per_target,
-            },
-            HTTPStatus.OK,
+        result = latest_scan_core(
+            self.db_path,
+            lookback_days=lookback_days,
+            max_pages_per_target=max_pages_per_target,
         )
-
-    def _send_webhook(self, url: str, payload: dict[str, Any]) -> tuple[bool, str | None]:
-        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        req = urllib.request.Request(
-            url=url,
-            data=data,
-            method="POST",
-            headers={"Content-Type": "application/json"},
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=8) as response:
-                status = int(response.status)
-            if 200 <= status < 300:
-                return True, None
-            return False, f"HTTP {status}"
-        except Exception as exc:
-            return False, str(exc)
-
-    def _push_new_alerts(self, limit: int = 50) -> dict[str, Any]:
-        conn = connect(self.db_path)
-        try:
-            webhooks = list_notification_targets(conn, target_type="webhook", include_disabled=False, limit=20)
-            alerts = list_alerts(conn, status="new", limit=max(1, int(limit)))
-            if not webhooks:
-                return {"alerts_considered": len(alerts), "pushed": 0, "failed": len(alerts), "errors": ["No webhook configured"]}
-
-            pushed = 0
-            failed = 0
-            errors: list[str] = []
-            for alert in alerts:
-                payload = {
-                    "alert_id": int(alert["id"]),
-                    "watch_target_id": int(alert["watch_target_id"]),
-                    "paper_id": alert["paper_id"],
-                    "alert_type": alert["alert_type"],
-                    "status": alert["status"],
-                    "payload": json.loads(alert["payload_json"]) if alert["payload_json"] else None,
-                    "created_at": alert["created_at"],
-                }
-                sent = False
-                for webhook in webhooks:
-                    ok, err = self._send_webhook(str(webhook["target_value"]), payload)
-                    if ok:
-                        sent = True
-                    else:
-                        if err:
-                            errors.append(err)
-                if sent:
-                    mark_alert_pushed(conn, int(alert["id"]))
-                    pushed += 1
-                else:
-                    failed += 1
-            conn.commit()
-            return {"alerts_considered": len(alerts), "pushed": pushed, "failed": failed, "errors": errors[:10]}
-        finally:
-            conn.close()
+        self._send_json({"ok": True, **result}, HTTPStatus.OK)
 
     def _handle_get_webhook_targets(self) -> None:
         conn = connect(self.db_path)
@@ -1457,10 +1712,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         try:
             limit = max(1, int(body.get("limit", 50)))
-        except ValueError:
+        except (TypeError, ValueError):
             self._send_json({"error": "limit must be integer"}, HTTPStatus.BAD_REQUEST)
             return
-        result = self._push_new_alerts(limit=limit)
+        result = push_new_alerts_core(self.db_path, limit=limit)
         self._send_json({"ok": True, **result}, HTTPStatus.OK)
 
     def _read_json_body(self) -> dict[str, Any] | None:
@@ -1506,20 +1761,47 @@ class DashboardHandler(BaseHTTPRequestHandler):
         LOGGER.info("web access " + format, *args)
 
 
+class PapermapHTTPServer(ThreadingHTTPServer):
+    _autoscan_stop_event: threading.Event | None = None
+    _autoscan_thread: threading.Thread | None = None
+
+    def stop_autoscan_worker(self, timeout: float = 5.0) -> None:
+        stop_event = self._autoscan_stop_event
+        worker = self._autoscan_thread
+        if stop_event is not None:
+            stop_event.set()
+        if worker is not None and worker.is_alive():
+            worker.join(timeout=timeout)
+
+    def server_close(self) -> None:  # noqa: D401
+        self.stop_autoscan_worker()
+        super().server_close()
+
+
 def create_http_server(
     db_path: Path,
     *,
     host: str = "127.0.0.1",
     port: int = 8765,
     default_recent_runs: int = 20,
-) -> ThreadingHTTPServer:
+) -> PapermapHTTPServer:
     init_db(db_path)
     handler = type(
         "PapermapDashboardHandler",
         (DashboardHandler,),
         {"db_path": db_path, "default_recent_runs": int(default_recent_runs)},
     )
-    return ThreadingHTTPServer((host, int(port)), handler)
+    server = PapermapHTTPServer((host, int(port)), handler)
+    server._autoscan_stop_event = threading.Event()
+    server._autoscan_thread = threading.Thread(
+        target=_auto_scan_loop,
+        args=(db_path, server._autoscan_stop_event),
+        daemon=True,
+        name="papermap-autoscan",
+    )
+    server._autoscan_thread.start()
+    LOGGER.info("autoscan worker started host=%s port=%s", host, port)
+    return server
 
 
 def serve_web(

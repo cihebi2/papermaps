@@ -897,6 +897,86 @@ class TestCliRegression(unittest.TestCase):
                 server.server_close()
                 thread.join(timeout=5)
 
+    def test_web_autoscan_config_roundtrip(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_path = tmp_path / "web_autoscan_config.db"
+
+            init_rc = run_cli(["init-db", "--db-path", str(db_path)], ROOT)
+            self.assertEqual(init_rc.returncode, 0, msg=init_rc.stdout + init_rc.stderr)
+
+            from src.web_server import create_http_server
+
+            server = create_http_server(db_path, host="127.0.0.1", port=0, default_recent_runs=5)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                port = int(server.server_address[1])
+                url = f"http://127.0.0.1:{port}/api/autoscan/config"
+                body = json.dumps(
+                    {
+                        "enabled": True,
+                        "interval_seconds": 120,
+                        "lookback_days": 14,
+                        "max_pages_per_target": 2,
+                        "push_new": False,
+                    }
+                ).encode("utf-8")
+                req = urllib.request.Request(
+                    url,
+                    data=body,
+                    method="POST",
+                    headers={"Content-Type": "application/json"},
+                )
+                with urllib.request.urlopen(req, timeout=2) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                self.assertTrue(payload["ok"])
+
+                with urllib.request.urlopen(url, timeout=2) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                self.assertTrue(payload["enabled"])
+                self.assertEqual(payload["interval_seconds"], 120)
+                self.assertEqual(payload["lookback_days"], 14)
+                self.assertEqual(payload["max_pages_per_target"], 2)
+                self.assertFalse(payload["push_new"])
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
+    def test_web_autoscan_config_invalid_interval_returns_400(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_path = tmp_path / "web_autoscan_config_invalid.db"
+
+            init_rc = run_cli(["init-db", "--db-path", str(db_path)], ROOT)
+            self.assertEqual(init_rc.returncode, 0, msg=init_rc.stdout + init_rc.stderr)
+
+            from src.web_server import create_http_server
+
+            server = create_http_server(db_path, host="127.0.0.1", port=0, default_recent_runs=5)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                port = int(server.server_address[1])
+                url = f"http://127.0.0.1:{port}/api/autoscan/config"
+                body = json.dumps({"enabled": True, "interval_seconds": 0}).encode("utf-8")
+                req = urllib.request.Request(
+                    url,
+                    data=body,
+                    method="POST",
+                    headers={"Content-Type": "application/json"},
+                )
+                with self.assertRaises(urllib.error.HTTPError) as cm:
+                    urllib.request.urlopen(req, timeout=2)
+                self.assertEqual(cm.exception.code, 400)
+                text = cm.exception.read().decode("utf-8")
+                self.assertIn("must be > 0", text)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
     def test_web_push_new_alerts_marks_pushed_and_calls_webhook(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
