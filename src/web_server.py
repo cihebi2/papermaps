@@ -14,10 +14,12 @@ try:
     from .db_init import init_db
     from .openalex_client import OpenAlexClient, canonical_work_id
     from .storage import (
+        add_saved_search,
         add_edge,
         add_watch_target,
         connect,
         get_app_setting,
+        list_saved_searches,
         list_watch_targets,
         set_app_setting,
         upsert_work,
@@ -25,7 +27,17 @@ try:
 except ImportError:
     from db_init import init_db
     from openalex_client import OpenAlexClient, canonical_work_id
-    from storage import add_edge, add_watch_target, connect, get_app_setting, list_watch_targets, set_app_setting, upsert_work
+    from storage import (
+        add_saved_search,
+        add_edge,
+        add_watch_target,
+        connect,
+        get_app_setting,
+        list_saved_searches,
+        list_watch_targets,
+        set_app_setting,
+        upsert_work,
+    )
 
 LOGGER = logging.getLogger(__name__)
 DOI_REGEX = re.compile(r"10\.\d{4,9}/[-._;()/:A-Za-z0-9]+$")
@@ -221,6 +233,17 @@ INDEX_HTML = """<!doctype html>
         <div id="similarResult" class="sub">No similar search yet.</div>
       </div>
     </section>
+    <section class="panel">
+      <h2>Saved Searches</h2>
+      <div style="padding:12px 14px; display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+        <label for="savedLimitInput">Limit</label>
+        <input id="savedLimitInput" type="number" min="1" max="100" value="10">
+        <button id="savedRefreshBtn" type="button">Refresh Saved Searches</button>
+      </div>
+      <div style="padding: 0 14px 14px;">
+        <div id="savedSearchesResult" class="sub">No history loaded.</div>
+      </div>
+    </section>
     <div id="error" class="error"></div>
     <div class="grid" id="cards"></div>
     <section class="panel">
@@ -265,6 +288,9 @@ INDEX_HTML = """<!doctype html>
     const saveSimilarData = document.getElementById("saveSimilarData");
     const similarBtn = document.getElementById("similarBtn");
     const similarResult = document.getElementById("similarResult");
+    const savedLimitInput = document.getElementById("savedLimitInput");
+    const savedRefreshBtn = document.getElementById("savedRefreshBtn");
+    const savedSearchesResult = document.getElementById("savedSearchesResult");
     let timer = null;
 
     function esc(v) {
@@ -400,12 +426,14 @@ INDEX_HTML = """<!doctype html>
           body: JSON.stringify({
             doi,
             save_watch: Boolean(saveWatchOnSearch.checked),
+            save_search: true,
           }),
         });
         const payload = await res.json();
         if (!res.ok) throw new Error(payload.error || `HTTP ${res.status}`);
         renderDoiResult(payload.work || null);
         await loadData();
+        await loadSavedSearches();
       } catch (err) {
         doiResult.textContent = `Search failed: ${err}`;
       }
@@ -432,6 +460,7 @@ INDEX_HTML = """<!doctype html>
           body: JSON.stringify({
             dois,
             save_watch: Boolean(saveWatchOnBatch.checked),
+            save_search: true,
           }),
         });
         const payload = await res.json();
@@ -449,6 +478,7 @@ INDEX_HTML = """<!doctype html>
         }
         doiBatchResult.innerHTML = lines.map((x) => esc(x)).join("<br>");
         await loadData();
+        await loadSavedSearches();
       } catch (err) {
         doiBatchResult.textContent = `Batch search failed: ${err}`;
       }
@@ -521,8 +551,34 @@ INDEX_HTML = """<!doctype html>
         }
         similarResult.innerHTML = lines.map((x) => esc(x)).join("<br>");
         await loadData();
+        await loadSavedSearches();
       } catch (err) {
         similarResult.textContent = `Similar search failed: ${err}`;
+      }
+    }
+
+    async function loadSavedSearches() {
+      savedSearchesResult.textContent = "";
+      const limit = Math.max(1, Number(savedLimitInput.value || 10));
+      savedLimitInput.value = String(limit);
+      try {
+        const res = await fetch(`/api/saved-searches?limit=${limit}`, { cache: "no-store" });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const payload = await res.json();
+        const rows = payload.items || [];
+        if (rows.length === 0) {
+          savedSearchesResult.textContent = "No saved searches.";
+          return;
+        }
+        const lines = rows.map((row) => {
+          const dois = (row.doi_list || []).join(", ");
+          const found = row.result_summary?.found ?? "-";
+          const failed = row.result_summary?.failed ?? "-";
+          return `#${row.id} [${row.created_at}] DOIs: ${dois} | found=${found} failed=${failed}`;
+        });
+        savedSearchesResult.innerHTML = lines.map((x) => esc(x)).join("<br>");
+      } catch (err) {
+        savedSearchesResult.textContent = `Load failed: ${err}`;
       }
     }
 
@@ -539,10 +595,12 @@ INDEX_HTML = """<!doctype html>
     searchDoiBatchBtn.addEventListener("click", searchByDoiBatch);
     relatedBtn.addEventListener("click", exploreRelated);
     similarBtn.addEventListener("click", findSimilarThemes);
+    savedRefreshBtn.addEventListener("click", loadSavedSearches);
     autoRefresh.addEventListener("change", startTimer);
     recentRunsInput.addEventListener("change", loadData);
     loadOpenAlexSettings();
     loadData();
+    loadSavedSearches();
     startTimer();
   </script>
 </body>
@@ -634,6 +692,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api/settings/openalex":
                 self._handle_get_openalex_settings()
+                LOGGER.info("web request success path=%s", parsed.path)
+                return
+            if parsed.path == "/api/saved-searches":
+                self._handle_get_saved_searches(parsed.query)
                 LOGGER.info("web request success path=%s", parsed.path)
                 return
             self._send_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
@@ -756,6 +818,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "Invalid DOI"}, HTTPStatus.BAD_REQUEST)
             return
         save_watch = bool(body.get("save_watch", True))
+        save_search = bool(body.get("save_search", True))
 
         client = self._build_openalex_client()
         work = client.get_work_by_doi(doi)
@@ -774,12 +837,23 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     enabled=1,
                     note=f"web doi:{doi}",
                 )
+            if save_search:
+                add_saved_search(
+                    conn,
+                    [doi],
+                    {
+                        "mode": "resolve-doi",
+                        "found": 1,
+                        "failed": 0,
+                        "work": self._serialize_work(work),
+                    },
+                )
             conn.commit()
         finally:
             conn.close()
 
         self._send_json(
-            {"ok": True, "saved_to_watch": save_watch, "work": self._serialize_work(work)},
+            {"ok": True, "saved_to_watch": save_watch, "saved_search": save_search, "work": self._serialize_work(work)},
             HTTPStatus.OK,
         )
 
@@ -801,6 +875,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "No valid DOI in request"}, HTTPStatus.BAD_REQUEST)
             return
         save_watch = bool(body.get("save_watch", True))
+        save_search = bool(body.get("save_search", True))
 
         client = self._build_openalex_client()
         found: list[dict[str, Any]] = []
@@ -825,6 +900,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     found.append(self._serialize_work(work))
                 except Exception as exc:
                     failed.append({"doi": doi, "error": str(exc)})
+            if save_search:
+                add_saved_search(
+                    conn,
+                    cleaned,
+                    {
+                        "mode": "resolve-dois",
+                        "found": len(found),
+                        "failed": len(failed),
+                    },
+                )
             conn.commit()
         finally:
             conn.close()
@@ -833,12 +918,54 @@ class DashboardHandler(BaseHTTPRequestHandler):
             {
                 "ok": True,
                 "save_watch": save_watch,
+                "save_search": save_search,
                 "requested": len(cleaned),
                 "found": found,
                 "failed": failed,
             },
             HTTPStatus.OK,
         )
+
+    def _handle_get_saved_searches(self, query: str) -> None:
+        params = parse_qs(query)
+        raw_limit = params.get("limit", ["10"])[0]
+        try:
+            limit = int(raw_limit)
+        except ValueError:
+            self._send_json({"error": "limit must be integer"}, HTTPStatus.BAD_REQUEST)
+            return
+        if limit <= 0:
+            self._send_json({"error": "limit must be > 0"}, HTTPStatus.BAD_REQUEST)
+            return
+
+        conn = connect(self.db_path)
+        try:
+            rows = list_saved_searches(conn, limit=limit)
+        finally:
+            conn.close()
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                doi_list = json.loads(row["doi_list"])
+            except Exception:
+                doi_list = []
+            try:
+                result_payload = json.loads(row["result_json"])
+            except Exception:
+                result_payload = {}
+            items.append(
+                {
+                    "id": int(row["id"]),
+                    "doi_list": doi_list if isinstance(doi_list, list) else [],
+                    "result_summary": {
+                        "found": result_payload.get("found"),
+                        "failed": result_payload.get("failed"),
+                        "mode": result_payload.get("mode"),
+                    },
+                    "created_at": row["created_at"],
+                }
+            )
+        self._send_json({"items": items, "limit": limit}, HTTPStatus.OK)
 
     def _handle_post_related_works(self) -> None:
         body = self._read_json_body()

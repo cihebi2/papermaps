@@ -682,6 +682,86 @@ class TestCliRegression(unittest.TestCase):
                 server.server_close()
                 thread.join(timeout=5)
 
+    def test_web_saved_searches_returns_history(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_path = tmp_path / "web_saved_searches.db"
+
+            init_rc = run_cli(["init-db", "--db-path", str(db_path)], ROOT)
+            self.assertEqual(init_rc.returncode, 0, msg=init_rc.stdout + init_rc.stderr)
+
+            works = {
+                "10.1000/a": {
+                    "id": "https://openalex.org/W1000",
+                    "title": "Work A",
+                    "doi": "https://doi.org/10.1000/a",
+                    "publication_date": "2023-01-01",
+                    "primary_location": {"source": {"display_name": "Journal A"}},
+                },
+            }
+
+            class _FakeClient:
+                def get_work_by_doi(self, doi: str) -> dict[str, object] | None:
+                    return works.get(doi)
+
+            from src.web_server import create_http_server
+
+            with mock.patch("src.web_server.OpenAlexClient", return_value=_FakeClient()):
+                server = create_http_server(db_path, host="127.0.0.1", port=0, default_recent_runs=5)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    port = int(server.server_address[1])
+                    post_url = f"http://127.0.0.1:{port}/api/works/resolve-dois"
+                    post_body = json.dumps({"dois": ["10.1000/a"], "save_watch": True, "save_search": True}).encode(
+                        "utf-8"
+                    )
+                    req = urllib.request.Request(
+                        post_url,
+                        data=post_body,
+                        method="POST",
+                        headers={"Content-Type": "application/json"},
+                    )
+                    with urllib.request.urlopen(req, timeout=2) as response:
+                        self.assertEqual(response.status, 200)
+
+                    get_url = f"http://127.0.0.1:{port}/api/saved-searches?limit=5"
+                    with urllib.request.urlopen(get_url, timeout=2) as response:
+                        self.assertEqual(response.status, 200)
+                        payload = json.loads(response.read().decode("utf-8"))
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    thread.join(timeout=5)
+
+            self.assertEqual(payload["limit"], 5)
+            self.assertGreaterEqual(len(payload["items"]), 1)
+            self.assertIn("10.1000/a", payload["items"][0]["doi_list"])
+
+    def test_web_saved_searches_invalid_limit_returns_400(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_path = tmp_path / "web_saved_searches_invalid.db"
+
+            init_rc = run_cli(["init-db", "--db-path", str(db_path)], ROOT)
+            self.assertEqual(init_rc.returncode, 0, msg=init_rc.stdout + init_rc.stderr)
+
+            from src.web_server import create_http_server
+
+            server = create_http_server(db_path, host="127.0.0.1", port=0, default_recent_runs=5)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                port = int(server.server_address[1])
+                url = f"http://127.0.0.1:{port}/api/saved-searches?limit=0"
+                with self.assertRaises(urllib.error.HTTPError) as cm:
+                    urllib.request.urlopen(url, timeout=2)
+                self.assertEqual(cm.exception.code, 400)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
     def test_smoke_run_success_writes_run_row(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
