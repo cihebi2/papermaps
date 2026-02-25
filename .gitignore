@@ -8,3 +8,4 @@ data/*.db*
 outputs/*.json
 outputs/*.gexf
 outputs/*.html
+outputs/*.md

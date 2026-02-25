@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import time
 from collections import deque
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -82,6 +83,29 @@ def build_parser() -> argparse.ArgumentParser:
     track_parser.add_argument("--from-date", default=None, help="Override from_publication_date (YYYY-MM-DD)")
     track_parser.add_argument("--lookback-days", type=int, default=30, help="Fallback window when watch has no cursor")
     track_parser.add_argument("--max-pages-per-target", type=int, default=3, help="OpenAlex pages per target paper")
+
+    scheduler_parser = subparsers.add_parser(
+        "run-scheduler",
+        help="Run citation tracking in a lightweight loop",
+    )
+    scheduler_parser.add_argument("--config", required=True, help="Config file path")
+    scheduler_parser.add_argument("--db-path", default=None, help="SQLite file path override")
+    scheduler_parser.add_argument("--iterations", type=int, default=1, help="Number of cycles to run")
+    scheduler_parser.add_argument("--interval-seconds", type=int, default=300, help="Sleep between cycles")
+    scheduler_parser.add_argument("--dry-run", action="store_true", help="Validate loop without calling OpenAlex")
+    scheduler_parser.add_argument("--from-date", default=None, help="Forwarded to track-citations")
+    scheduler_parser.add_argument("--lookback-days", type=int, default=30, help="Forwarded to track-citations")
+    scheduler_parser.add_argument(
+        "--max-pages-per-target",
+        type=int,
+        default=3,
+        help="Forwarded to track-citations",
+    )
+
+    report_parser = subparsers.add_parser("report-summary", help="Generate a markdown summary report from database")
+    report_parser.add_argument("--db-path", default="data/papermap.db", help="SQLite file path")
+    report_parser.add_argument("--out-file", default=None, help="Output markdown file path")
+    report_parser.add_argument("--recent-runs", type=int, default=10, help="How many latest runs to include")
 
     export_parser = subparsers.add_parser("export-graph", help="Export paper graph from database")
     export_parser.add_argument("--db-path", default="data/papermap.db", help="SQLite file path")
@@ -386,6 +410,151 @@ def track_citations(args: argparse.Namespace) -> int:
         return 1
 
 
+def run_scheduler(args: argparse.Namespace) -> int:
+    if int(args.iterations) <= 0:
+        LOGGER.error("run-scheduler invalid iterations=%s (must be > 0)", args.iterations)
+        return 1
+    if int(args.interval_seconds) < 0:
+        LOGGER.error("run-scheduler invalid interval-seconds=%s (must be >= 0)", args.interval_seconds)
+        return 1
+
+    config = load_config(Path(args.config))
+    db_path = resolve_db_path(args.db_path, config)
+    init_db(db_path)
+
+    run_id = create_run(
+        db_path,
+        "run-scheduler",
+        detail=(
+            f"iterations={args.iterations};interval_seconds={args.interval_seconds};"
+            f"dry_run={args.dry_run};config={args.config}"
+        ),
+    )
+
+    completed = 0
+    failures = 0
+    try:
+        for idx in range(int(args.iterations)):
+            cycle = idx + 1
+            LOGGER.info(
+                "run-scheduler cycle start cycle=%s/%s dry_run=%s",
+                cycle,
+                args.iterations,
+                bool(args.dry_run),
+            )
+            if args.dry_run:
+                LOGGER.info("run-scheduler dry-run cycle=%s skip track-citations", cycle)
+            else:
+                track_args = argparse.Namespace(
+                    config=args.config,
+                    db_path=str(db_path),
+                    from_date=args.from_date,
+                    lookback_days=int(args.lookback_days),
+                    max_pages_per_target=int(args.max_pages_per_target),
+                )
+                rc = track_citations(track_args)
+                if rc != 0:
+                    failures += 1
+                    LOGGER.warning("run-scheduler cycle=%s track-citations failed rc=%s", cycle, rc)
+            completed += 1
+            if cycle < int(args.iterations) and int(args.interval_seconds) > 0:
+                LOGGER.info("run-scheduler sleeping seconds=%s", args.interval_seconds)
+                time.sleep(int(args.interval_seconds))
+
+        status = "success" if failures == 0 else "failed"
+        detail = f"completed={completed};failures={failures};dry_run={bool(args.dry_run)}"
+        finish_run(
+            db_path,
+            run_id,
+            status,
+            detail=detail,
+            stats_json=_json_stats(
+                {
+                    "iterations": int(args.iterations),
+                    "interval_seconds": int(args.interval_seconds),
+                    "completed": completed,
+                    "failures": failures,
+                    "dry_run": bool(args.dry_run),
+                }
+            ),
+        )
+        return 0 if failures == 0 else 1
+    except Exception as exc:
+        _mark_run_failed(db_path, run_id, str(exc))
+        LOGGER.exception("run-scheduler unexpected failure")
+        return 1
+
+
+def report_summary(args: argparse.Namespace) -> int:
+    db_path = Path(args.db_path)
+    if not db_path.exists():
+        LOGGER.error("Database file does not exist: %s", db_path)
+        return 1
+    if int(args.recent_runs) <= 0:
+        LOGGER.error("Invalid --recent-runs=%s (must be > 0)", args.recent_runs)
+        return 1
+
+    out_file = Path(args.out_file) if args.out_file else Path("outputs") / f"summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+    out_file.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        with connect(db_path) as conn:
+            papers_count = int(conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0])
+            edges_count = int(conn.execute("SELECT COUNT(*) FROM edges").fetchone()[0])
+            watches_count = int(conn.execute("SELECT COUNT(*) FROM watch_targets").fetchone()[0])
+            runs_count = int(conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0])
+
+            relation_rows = conn.execute(
+                "SELECT relation, COUNT(*) AS cnt FROM edges GROUP BY relation ORDER BY relation"
+            ).fetchall()
+            run_rows = conn.execute(
+                """
+                SELECT id, job_name, status, started_at, finished_at, detail
+                FROM runs
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (int(args.recent_runs),),
+            ).fetchall()
+
+        lines: list[str] = []
+        lines.append("# Papermap Summary Report")
+        lines.append("")
+        lines.append(f"- Generated at: {datetime.now().isoformat(timespec='seconds')}")
+        lines.append(f"- Database: `{db_path}`")
+        lines.append("")
+        lines.append("## Counts")
+        lines.append(f"- papers: `{papers_count}`")
+        lines.append(f"- edges: `{edges_count}`")
+        lines.append(f"- watch_targets: `{watches_count}`")
+        lines.append(f"- runs: `{runs_count}`")
+        lines.append("")
+        lines.append("## Edge Relations")
+        if relation_rows:
+            for row in relation_rows:
+                lines.append(f"- {row['relation']}: `{row['cnt']}`")
+        else:
+            lines.append("- (none)")
+        lines.append("")
+        lines.append(f"## Recent Runs (last {int(args.recent_runs)})")
+        if run_rows:
+            for row in run_rows:
+                lines.append(
+                    f"- #{row['id']} `{row['job_name']}` `{row['status']}` "
+                    f"start={row['started_at']} end={row['finished_at'] or '-'} detail={row['detail'] or '-'}"
+                )
+        else:
+            lines.append("- (none)")
+        lines.append("")
+
+        out_file.write_text("\n".join(lines), encoding="utf-8")
+        LOGGER.info("report-summary wrote %s", out_file)
+        return 0
+    except Exception:
+        LOGGER.exception("report-summary failed db_path=%s", db_path)
+        return 1
+
+
 def export_graph(args: argparse.Namespace) -> int:
     db_path = Path(args.db_path)
     if not db_path.exists():
@@ -434,6 +603,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return expand_references(args)
     if args.command == "track-citations":
         return track_citations(args)
+    if args.command == "run-scheduler":
+        return run_scheduler(args)
+    if args.command == "report-summary":
+        return report_summary(args)
     if args.command == "export-graph":
         return export_graph(args)
 

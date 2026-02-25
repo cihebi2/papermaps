@@ -51,6 +51,28 @@
   - timestamped step doc:
     - `docs/dev_record_2026-02-25_115130_phase1_mvp.md`
 
+6. 2026-02-25 16:50:47
+- Added Phase 0 Step 3 regression gate:
+  - command-level automated checks using Python `unittest`
+  - covers `init-db` idempotency + `smoke-run` success + `ingest-dois` invalid DOI failure
+  - timestamped step doc:
+    - `docs/dev_record_2026-02-25_165047_phase0_step3_tests.md`
+
+7. 2026-02-25 17:22:07
+- Added lightweight scheduler loop command:
+  - `run-scheduler` for iterative `track-citations` execution
+  - dry-run mode for stable local validation without network dependency
+  - regression tests for happy/boundary scheduler paths
+  - timestamped step doc:
+    - `docs/dev_record_2026-02-25_172207_phase2_scheduler.md`
+
+8. 2026-02-25 17:27:47
+- Added minimal database summary reporting:
+  - `report-summary` command to produce markdown operational snapshot
+  - regression tests for report generation and missing DB boundary case
+  - timestamped step doc:
+    - `docs/dev_record_2026-02-25_172747_phase2_report_summary.md`
+
 ## 3. Current Constraints
 
 1. Out of scope until explicitly scheduled:

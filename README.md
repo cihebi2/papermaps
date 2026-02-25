@@ -72,6 +72,18 @@ Track latest citations for watched papers:
 python src/cli.py track-citations --config config.example.yaml --db-path data/papermap.db --max-pages-per-target 1
 ```
 
+Lightweight scheduler loop (manual process, not daemon):
+
+```bash
+python src/cli.py run-scheduler --config config.example.yaml --db-path data/papermap.db --iterations 2 --interval-seconds 0 --dry-run
+```
+
+Generate markdown summary report from database:
+
+```bash
+python src/cli.py report-summary --db-path data/papermap.db --out-file outputs/summary.md --recent-runs 10
+```
+
 Export graph files:
 
 ```bash
@@ -95,3 +107,21 @@ For a seed DOI `10.1093/bib/bbae583`, the MVP pipeline generated:
 - `docs/openalex_roadmap_2026-02-25_101059.md`
 - `docs/development_standard_2026-02-25_112707.md`
 - `docs/dev_record_2026-02-25_111821_phase0_step2.md`
+
+## Automated Checks
+
+Run command-level regression checks (no extra dependencies):
+
+```bash
+python -m unittest tests/test_cli_regression.py -v
+```
+
+Covered checks:
+
+1. `init-db` idempotency
+2. `smoke-run` success path (`runs` status)
+3. `ingest-dois` invalid DOI failure path
+4. `run-scheduler` dry-run success path
+5. `run-scheduler` invalid iterations failure path
+6. `report-summary` markdown generation path
+7. `report-summary` missing DB failure path
