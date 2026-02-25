@@ -359,6 +359,81 @@ class TestCliRegression(unittest.TestCase):
                 server.server_close()
                 thread.join(timeout=5)
 
+    def test_web_resolve_dois_batch_supports_multiple(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_path = tmp_path / "web_resolve_dois.db"
+
+            init_rc = run_cli(["init-db", "--db-path", str(db_path)], ROOT)
+            self.assertEqual(init_rc.returncode, 0, msg=init_rc.stdout + init_rc.stderr)
+
+            works = {
+                "10.1000/a": {
+                    "id": "https://openalex.org/W1000",
+                    "title": "Work A",
+                    "doi": "https://doi.org/10.1000/a",
+                    "publication_date": "2023-01-01",
+                    "cited_by_count": 1,
+                    "primary_location": {"source": {"display_name": "Journal A"}},
+                },
+                "10.1000/b": {
+                    "id": "https://openalex.org/W2000",
+                    "title": "Work B",
+                    "doi": "https://doi.org/10.1000/b",
+                    "publication_date": "2023-01-02",
+                    "cited_by_count": 2,
+                    "primary_location": {"source": {"display_name": "Journal B"}},
+                },
+            }
+
+            class _FakeClient:
+                def get_work_by_doi(self, doi: str) -> dict[str, object] | None:
+                    return works.get(doi)
+
+            from src.web_server import create_http_server
+
+            with mock.patch("src.web_server.OpenAlexClient", return_value=_FakeClient()):
+                server = create_http_server(db_path, host="127.0.0.1", port=0, default_recent_runs=5)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    port = int(server.server_address[1])
+                    url = f"http://127.0.0.1:{port}/api/works/resolve-dois"
+                    body = json.dumps(
+                        {
+                            "dois": ["10.1000/a", "10.1000/b", "10.1000/missing"],
+                            "save_watch": True,
+                        }
+                    ).encode("utf-8")
+                    req = urllib.request.Request(
+                        url,
+                        data=body,
+                        method="POST",
+                        headers={"Content-Type": "application/json"},
+                    )
+                    with urllib.request.urlopen(req, timeout=2) as response:
+                        self.assertEqual(response.status, 200)
+                        payload = json.loads(response.read().decode("utf-8"))
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    thread.join(timeout=5)
+
+            self.assertEqual(payload["requested"], 3)
+            self.assertEqual(len(payload["found"]), 2)
+            self.assertEqual(len(payload["failed"]), 1)
+
+            conn = sqlite3.connect(db_path)
+            try:
+                papers = int(conn.execute("SELECT COUNT(*) FROM papers WHERE paper_id IN ('W1000', 'W2000')").fetchone()[0])
+                watches = int(
+                    conn.execute("SELECT COUNT(*) FROM watch_targets WHERE target_value IN ('W1000', 'W2000')").fetchone()[0]
+                )
+            finally:
+                conn.close()
+            self.assertEqual(papers, 2)
+            self.assertEqual(watches, 2)
+
     def test_smoke_run_success_writes_run_row(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
