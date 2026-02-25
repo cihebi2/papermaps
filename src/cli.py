@@ -118,6 +118,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Filter recent runs by status",
     )
+    report_parser.add_argument(
+        "--job-name-filter",
+        default=None,
+        help="Filter recent runs by job name",
+    )
 
     export_parser = subparsers.add_parser("export-graph", help="Export paper graph from database")
     export_parser.add_argument("--db-path", default="data/papermap.db", help="SQLite file path")
@@ -523,7 +528,18 @@ def report_summary(args: argparse.Namespace) -> int:
             relation_rows = conn.execute(
                 "SELECT relation, COUNT(*) AS cnt FROM edges GROUP BY relation ORDER BY relation"
             ).fetchall()
-            if args.status_filter:
+            if args.status_filter and args.job_name_filter:
+                run_rows = conn.execute(
+                    """
+                    SELECT id, job_name, status, started_at, finished_at, detail
+                    FROM runs
+                    WHERE status = ? AND job_name = ?
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (args.status_filter, args.job_name_filter, int(args.recent_runs)),
+                ).fetchall()
+            elif args.status_filter:
                 run_rows = conn.execute(
                     """
                     SELECT id, job_name, status, started_at, finished_at, detail
@@ -533,6 +549,17 @@ def report_summary(args: argparse.Namespace) -> int:
                     LIMIT ?
                     """,
                     (args.status_filter, int(args.recent_runs)),
+                ).fetchall()
+            elif args.job_name_filter:
+                run_rows = conn.execute(
+                    """
+                    SELECT id, job_name, status, started_at, finished_at, detail
+                    FROM runs
+                    WHERE job_name = ?
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (args.job_name_filter, int(args.recent_runs)),
                 ).fetchall()
             else:
                 run_rows = conn.execute(
@@ -568,6 +595,7 @@ def report_summary(args: argparse.Namespace) -> int:
             ],
             "recent_runs_limit": int(args.recent_runs),
             "status_filter": args.status_filter,
+            "job_name_filter": args.job_name_filter,
         }
 
         if args.format == "json":
@@ -580,6 +608,8 @@ def report_summary(args: argparse.Namespace) -> int:
             lines.append(f"- Database: `{db_path}`")
             if args.status_filter:
                 lines.append(f"- Status filter: `{args.status_filter}`")
+            if args.job_name_filter:
+                lines.append(f"- Job filter: `{args.job_name_filter}`")
             lines.append("")
             lines.append("## Counts")
             lines.append(f"- papers: `{papers_count}`")
