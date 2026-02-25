@@ -91,7 +91,7 @@ class TestCliRegression(unittest.TestCase):
             conn = sqlite3.connect(db_path)
             try:
                 row = conn.execute(
-                    "SELECT job_name, status, detail FROM runs ORDER BY id DESC LIMIT 1"
+                    "SELECT job_name, status, detail FROM runs WHERE job_name='smoke-run' ORDER BY id DESC LIMIT 1"
                 ).fetchone()
             finally:
                 conn.close()
@@ -124,7 +124,7 @@ class TestCliRegression(unittest.TestCase):
             conn = sqlite3.connect(db_path)
             try:
                 row = conn.execute(
-                    "SELECT job_name, status, detail FROM runs ORDER BY id DESC LIMIT 1"
+                    "SELECT job_name, status, detail FROM runs WHERE job_name='ingest-dois' ORDER BY id DESC LIMIT 1"
                 ).fetchone()
             finally:
                 conn.close()
@@ -161,7 +161,7 @@ class TestCliRegression(unittest.TestCase):
             conn = sqlite3.connect(db_path)
             try:
                 row = conn.execute(
-                    "SELECT job_name, status, detail FROM runs ORDER BY id DESC LIMIT 1"
+                    "SELECT job_name, status, detail FROM runs WHERE job_name='run-scheduler' ORDER BY id DESC LIMIT 1"
                 ).fetchone()
             finally:
                 conn.close()
@@ -626,7 +626,7 @@ class TestCliRegression(unittest.TestCase):
             conn = sqlite3.connect(db_path)
             try:
                 row = conn.execute(
-                    "SELECT job_name, status, detail FROM runs ORDER BY id DESC LIMIT 1"
+                    "SELECT job_name, status, detail FROM runs WHERE job_name='track-citations' ORDER BY id DESC LIMIT 1"
                 ).fetchone()
             finally:
                 conn.close()
@@ -673,6 +673,47 @@ class TestCliRegression(unittest.TestCase):
             self.assertEqual(row[0], "track-citations")
             self.assertEqual(row[1], "success")
             self.assertIn("targets=1", row[2] or "")
+
+    def test_run_scheduler_stop_on_failure_stops_early(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_path = tmp_path / "scheduler_stop.db"
+            config_path = tmp_path / "config.yaml"
+            write_min_config(config_path, db_path)
+
+            init_rc = run_cli(["init-db", "--db-path", str(db_path)], ROOT)
+            self.assertEqual(init_rc.returncode, 0, msg=init_rc.stdout + init_rc.stderr)
+
+            result = run_cli(
+                [
+                    "run-scheduler",
+                    "--config",
+                    str(config_path),
+                    "--db-path",
+                    str(db_path),
+                    "--iterations",
+                    "3",
+                    "--interval-seconds",
+                    "0",
+                    "--stop-on-failure",
+                ],
+                ROOT,
+            )
+            self.assertNotEqual(result.returncode, 0)
+
+            conn = sqlite3.connect(db_path)
+            try:
+                row = conn.execute(
+                    "SELECT job_name, status, detail FROM runs WHERE job_name='run-scheduler' ORDER BY id DESC LIMIT 1"
+                ).fetchone()
+            finally:
+                conn.close()
+
+            self.assertIsNotNone(row)
+            self.assertEqual(row[0], "run-scheduler")
+            self.assertEqual(row[1], "failed")
+            self.assertIn("completed=1", row[2] or "")
+            self.assertIn("failures=1", row[2] or "")
 
 
 if __name__ == "__main__":

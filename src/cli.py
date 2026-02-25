@@ -97,6 +97,7 @@ def build_parser() -> argparse.ArgumentParser:
     scheduler_parser.add_argument("--iterations", type=int, default=1, help="Number of cycles to run")
     scheduler_parser.add_argument("--interval-seconds", type=int, default=300, help="Sleep between cycles")
     scheduler_parser.add_argument("--dry-run", action="store_true", help="Validate loop without calling OpenAlex")
+    scheduler_parser.add_argument("--stop-on-failure", action="store_true", help="Stop loop when one cycle fails")
     scheduler_parser.add_argument("--from-date", default=None, help="Forwarded to track-citations")
     scheduler_parser.add_argument("--lookback-days", type=int, default=30, help="Forwarded to track-citations")
     scheduler_parser.add_argument(
@@ -518,11 +519,16 @@ def run_scheduler(args: argparse.Namespace) -> int:
                     lookback_days=int(args.lookback_days),
                     max_pages_per_target=int(args.max_pages_per_target),
                     dry_run=False,
+                    target_id=[],
                 )
                 rc = track_citations(track_args)
                 if rc != 0:
                     failures += 1
                     LOGGER.warning("run-scheduler cycle=%s track-citations failed rc=%s", cycle, rc)
+                    if bool(args.stop_on_failure):
+                        LOGGER.warning("run-scheduler stop-on-failure triggered at cycle=%s", cycle)
+                        completed += 1
+                        break
             completed += 1
             if cycle < int(args.iterations) and int(args.interval_seconds) > 0:
                 LOGGER.info("run-scheduler sleeping seconds=%s", args.interval_seconds)
