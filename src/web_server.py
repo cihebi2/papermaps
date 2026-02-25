@@ -11,10 +11,10 @@ from urllib.parse import parse_qs, urlparse
 
 try:
     from .db_init import init_db
-    from .storage import connect, list_watch_targets
+    from .storage import connect, get_app_setting, list_watch_targets, set_app_setting
 except ImportError:
     from db_init import init_db
-    from storage import connect, list_watch_targets
+    from storage import connect, get_app_setting, list_watch_targets, set_app_setting
 
 LOGGER = logging.getLogger(__name__)
 
@@ -133,6 +133,20 @@ INDEX_HTML = """<!doctype html>
       <label><input id="autoRefresh" type="checkbox" checked> Auto refresh (15s)</label>
       <span id="stamp" class="sub"></span>
     </div>
+    <section class="panel">
+      <h2>OpenAlex Settings</h2>
+      <div style="padding:12px 14px; display:grid; grid-template-columns: 120px 1fr; gap:10px; align-items:center;">
+        <label for="openalexKey">API Key</label>
+        <input id="openalexKey" type="text" placeholder="OpenAlex API key (optional)">
+        <label for="openalexMailto">Mailto</label>
+        <input id="openalexMailto" type="email" placeholder="you@example.com">
+        <span></span>
+        <div>
+          <button id="saveSettingsBtn" type="button">Save Settings</button>
+          <span id="settingsStatus" class="sub" style="margin-left:10px;"></span>
+        </div>
+      </div>
+    </section>
     <div id="error" class="error"></div>
     <div class="grid" id="cards"></div>
     <section class="panel">
@@ -154,6 +168,10 @@ INDEX_HTML = """<!doctype html>
     const recentRunsInput = document.getElementById("recentRuns");
     const autoRefresh = document.getElementById("autoRefresh");
     const refreshBtn = document.getElementById("refreshBtn");
+    const openalexKey = document.getElementById("openalexKey");
+    const openalexMailto = document.getElementById("openalexMailto");
+    const saveSettingsBtn = document.getElementById("saveSettingsBtn");
+    const settingsStatus = document.getElementById("settingsStatus");
     let timer = null;
 
     function esc(v) {
@@ -226,6 +244,40 @@ INDEX_HTML = """<!doctype html>
       }
     }
 
+    async function loadOpenAlexSettings() {
+      try {
+        const res = await fetch("/api/settings/openalex", { cache: "no-store" });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const payload = await res.json();
+        openalexKey.value = payload.api_key || "";
+        openalexMailto.value = payload.mailto || "";
+      } catch (err) {
+        settingsStatus.textContent = `Load failed: ${err}`;
+      }
+    }
+
+    async function saveOpenAlexSettings() {
+      settingsStatus.textContent = "";
+      try {
+        const body = {
+          api_key: openalexKey.value.trim(),
+          mailto: openalexMailto.value.trim(),
+        };
+        const res = await fetch("/api/settings/openalex", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        if (!res.ok) {
+          const text = await res.text();
+          throw new Error(`HTTP ${res.status}: ${text}`);
+        }
+        settingsStatus.textContent = "Saved";
+      } catch (err) {
+        settingsStatus.textContent = `Save failed: ${err}`;
+      }
+    }
+
     function startTimer() {
       if (timer) clearInterval(timer);
       if (autoRefresh.checked) {
@@ -234,8 +286,10 @@ INDEX_HTML = """<!doctype html>
     }
 
     refreshBtn.addEventListener("click", loadData);
+    saveSettingsBtn.addEventListener("click", saveOpenAlexSettings);
     autoRefresh.addEventListener("change", startTimer);
     recentRunsInput.addEventListener("change", loadData);
+    loadOpenAlexSettings();
     loadData();
     startTimer();
   </script>
@@ -326,9 +380,26 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._handle_dashboard(parsed.query)
                 LOGGER.info("web request success path=%s", parsed.path)
                 return
+            if parsed.path == "/api/settings/openalex":
+                self._handle_get_openalex_settings()
+                LOGGER.info("web request success path=%s", parsed.path)
+                return
             self._send_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
         except Exception as exc:
             LOGGER.exception("web request failed path=%s error=%s", parsed.path, exc)
+            self._send_json({"error": "Internal server error"}, HTTPStatus.INTERNAL_SERVER_ERROR)
+
+    def do_POST(self) -> None:  # noqa: N802
+        parsed = urlparse(self.path)
+        LOGGER.info("web request start method=POST path=%s", parsed.path)
+        try:
+            if parsed.path == "/api/settings/openalex":
+                self._handle_post_openalex_settings()
+                LOGGER.info("web request success method=POST path=%s", parsed.path)
+                return
+            self._send_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
+        except Exception as exc:
+            LOGGER.exception("web request failed method=POST path=%s error=%s", parsed.path, exc)
             self._send_json({"error": "Internal server error"}, HTTPStatus.INTERNAL_SERVER_ERROR)
 
     def _handle_dashboard(self, query: str) -> None:
@@ -345,6 +416,55 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         payload = build_dashboard_payload(self.db_path, recent_runs=recent_runs)
         self._send_json(payload, HTTPStatus.OK)
+
+    def _handle_get_openalex_settings(self) -> None:
+        conn = connect(self.db_path)
+        try:
+            api_key = get_app_setting(conn, "openalex.api_key", default="") or ""
+            mailto = get_app_setting(conn, "openalex.mailto", default="") or ""
+        finally:
+            conn.close()
+        self._send_json({"api_key": api_key, "mailto": mailto}, HTTPStatus.OK)
+
+    def _handle_post_openalex_settings(self) -> None:
+        body = self._read_json_body()
+        if body is None:
+            return
+        api_key = str(body.get("api_key", "")).strip()
+        mailto = str(body.get("mailto", "")).strip()
+        if mailto and "@" not in mailto:
+            self._send_json({"error": "mailto must contain @"}, HTTPStatus.BAD_REQUEST)
+            return
+
+        conn = connect(self.db_path)
+        try:
+            set_app_setting(conn, "openalex.api_key", api_key)
+            set_app_setting(conn, "openalex.mailto", mailto)
+            conn.commit()
+        finally:
+            conn.close()
+        self._send_json({"ok": True, "api_key_set": bool(api_key), "mailto": mailto}, HTTPStatus.OK)
+
+    def _read_json_body(self) -> dict[str, Any] | None:
+        raw_length = self.headers.get("Content-Length", "0")
+        try:
+            length = int(raw_length)
+        except ValueError:
+            self._send_json({"error": "Invalid Content-Length"}, HTTPStatus.BAD_REQUEST)
+            return None
+        if length <= 0:
+            self._send_json({"error": "Empty request body"}, HTTPStatus.BAD_REQUEST)
+            return None
+        body = self.rfile.read(length).decode("utf-8")
+        try:
+            parsed = json.loads(body)
+        except json.JSONDecodeError:
+            self._send_json({"error": "Invalid JSON body"}, HTTPStatus.BAD_REQUEST)
+            return None
+        if not isinstance(parsed, dict):
+            self._send_json({"error": "JSON body must be an object"}, HTTPStatus.BAD_REQUEST)
+            return None
+        return parsed
 
     def _send_html(self, html: str) -> None:
         body = html.encode("utf-8")

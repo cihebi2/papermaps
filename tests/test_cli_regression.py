@@ -193,6 +193,75 @@ class TestCliRegression(unittest.TestCase):
                 server.server_close()
                 thread.join(timeout=5)
 
+    def test_web_openalex_settings_roundtrip(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_path = tmp_path / "web_settings.db"
+
+            init_rc = run_cli(["init-db", "--db-path", str(db_path)], ROOT)
+            self.assertEqual(init_rc.returncode, 0, msg=init_rc.stdout + init_rc.stderr)
+
+            from src.web_server import create_http_server
+
+            server = create_http_server(db_path, host="127.0.0.1", port=0, default_recent_runs=5)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                port = int(server.server_address[1])
+                post_url = f"http://127.0.0.1:{port}/api/settings/openalex"
+                payload = json.dumps({"api_key": "demo-key-123", "mailto": "me@example.com"}).encode("utf-8")
+                req = urllib.request.Request(
+                    post_url,
+                    data=payload,
+                    method="POST",
+                    headers={"Content-Type": "application/json"},
+                )
+                with urllib.request.urlopen(req, timeout=2) as response:
+                    self.assertEqual(response.status, 200)
+
+                with urllib.request.urlopen(post_url, timeout=2) as response:
+                    self.assertEqual(response.status, 200)
+                    body = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(body["api_key"], "demo-key-123")
+                self.assertEqual(body["mailto"], "me@example.com")
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
+    def test_web_openalex_settings_invalid_mailto_returns_400(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_path = tmp_path / "web_settings_invalid.db"
+
+            init_rc = run_cli(["init-db", "--db-path", str(db_path)], ROOT)
+            self.assertEqual(init_rc.returncode, 0, msg=init_rc.stdout + init_rc.stderr)
+
+            from src.web_server import create_http_server
+
+            server = create_http_server(db_path, host="127.0.0.1", port=0, default_recent_runs=5)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                port = int(server.server_address[1])
+                url = f"http://127.0.0.1:{port}/api/settings/openalex"
+                payload = json.dumps({"api_key": "demo-key-123", "mailto": "invalid"}).encode("utf-8")
+                req = urllib.request.Request(
+                    url,
+                    data=payload,
+                    method="POST",
+                    headers={"Content-Type": "application/json"},
+                )
+                with self.assertRaises(urllib.error.HTTPError) as cm:
+                    urllib.request.urlopen(req, timeout=2)
+                self.assertEqual(cm.exception.code, 400)
+                text = cm.exception.read().decode("utf-8")
+                self.assertIn("mailto", text)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
     def test_smoke_run_success_writes_run_row(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
