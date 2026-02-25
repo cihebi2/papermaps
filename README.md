@@ -96,6 +96,14 @@ Export graph files:
 python src/cli.py export-graph --db-path data/papermap.db --out-dir outputs --prefix papermap --formats json,gexf,html
 ```
 
+Start local web dashboard:
+
+```bash
+python src/cli.py serve-web --db-path data/papermap.db --host 127.0.0.1 --port 8765 --recent-runs 20
+```
+
+Then open `http://127.0.0.1:8765/` in your browser.
+
 ## Example Run Output
 
 For a seed DOI `10.1093/bib/bbae583`, the MVP pipeline generated:

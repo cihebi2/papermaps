@@ -16,6 +16,7 @@ try:
     from .db_init import create_run, finish_run, init_db
     from .graph_export import export_graph_gexf, export_graph_html, export_graph_json
     from .openalex_client import OpenAlexClient, canonical_work_id
+    from .web_server import serve_web
     from .storage import (
         add_edge,
         add_watch_target,
@@ -34,6 +35,7 @@ except ImportError:
     from db_init import create_run, finish_run, init_db
     from graph_export import export_graph_gexf, export_graph_html, export_graph_json
     from openalex_client import OpenAlexClient, canonical_work_id
+    from web_server import serve_web
     from storage import (
         add_edge,
         add_watch_target,
@@ -182,6 +184,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="json,gexf,html",
         help="Comma-separated formats: json,gexf,html",
     )
+
+    web_parser = subparsers.add_parser("serve-web", help="Start local web dashboard")
+    web_parser.add_argument("--db-path", default="data/papermap.db", help="SQLite file path")
+    web_parser.add_argument("--host", default="127.0.0.1", help="Bind host")
+    web_parser.add_argument("--port", type=int, default=8765, help="Bind port (0-65535)")
+    web_parser.add_argument("--recent-runs", type=int, default=20, help="Default recent runs shown in dashboard")
     return parser
 
 
@@ -976,6 +984,22 @@ def export_graph(args: argparse.Namespace) -> int:
     return 0
 
 
+def serve_web_command(args: argparse.Namespace) -> int:
+    db_path = Path(args.db_path)
+    if int(args.port) < 0 or int(args.port) > 65535:
+        LOGGER.error("Invalid --port=%s (must be in 0-65535)", args.port)
+        return 1
+    if int(args.recent_runs) <= 0:
+        LOGGER.error("Invalid --recent-runs=%s (must be > 0)", args.recent_runs)
+        return 1
+    return serve_web(
+        db_path,
+        host=str(args.host),
+        port=int(args.port),
+        default_recent_runs=int(args.recent_runs),
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     parser = build_parser()
@@ -1006,6 +1030,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return report_summary(args)
     if args.command == "export-graph":
         return export_graph(args)
+    if args.command == "serve-web":
+        return serve_web_command(args)
 
     parser.error(f"Unsupported command: {args.command}")
     return 2

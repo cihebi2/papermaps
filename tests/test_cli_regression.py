@@ -4,8 +4,12 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 import json
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 
@@ -103,6 +107,91 @@ class TestCliRegression(unittest.TestCase):
             self.assertEqual(len(list(out_dir.glob("graphall_*.json"))), 1)
             self.assertEqual(len(list(out_dir.glob("graphall_*.gexf"))), 1)
             self.assertEqual(len(list(out_dir.glob("graphall_*.html"))), 1)
+
+    def test_web_dashboard_api_returns_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_path = tmp_path / "web_dashboard.db"
+            config_path = tmp_path / "config.yaml"
+            write_min_config(config_path, db_path)
+
+            smoke_rc = run_cli(["smoke-run", "--config", str(config_path), "--db-path", str(db_path)], ROOT)
+            self.assertEqual(smoke_rc.returncode, 0, msg=smoke_rc.stdout + smoke_rc.stderr)
+
+            add_rc = run_cli(
+                [
+                    "add-watch-target",
+                    "--db-path",
+                    str(db_path),
+                    "--target-type",
+                    "paper",
+                    "--target-value",
+                    "W1234567890",
+                    "--enabled",
+                    "1",
+                ],
+                ROOT,
+            )
+            self.assertEqual(add_rc.returncode, 0, msg=add_rc.stdout + add_rc.stderr)
+
+            from src.web_server import create_http_server
+
+            server = create_http_server(db_path, host="127.0.0.1", port=0, default_recent_runs=5)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                port = int(server.server_address[1])
+                url = f"http://127.0.0.1:{port}/api/dashboard?recent_runs=3"
+
+                payload = None
+                last_error: Exception | None = None
+                for _ in range(20):
+                    try:
+                        with urllib.request.urlopen(url, timeout=2) as response:
+                            self.assertEqual(response.status, 200)
+                            payload = json.loads(response.read().decode("utf-8"))
+                            break
+                    except Exception as exc:
+                        last_error = exc
+                        time.sleep(0.05)
+                if payload is None:
+                    self.fail(f"dashboard api did not respond successfully: {last_error}")
+
+                self.assertIn("counts", payload)
+                self.assertIn("recent_runs", payload)
+                self.assertIn("watch_targets", payload)
+                self.assertGreaterEqual(payload["counts"]["runs"], 1)
+                self.assertGreaterEqual(len(payload["watch_targets"]), 1)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
+    def test_web_dashboard_api_invalid_recent_runs_returns_400(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_path = tmp_path / "web_dashboard_invalid.db"
+
+            init_rc = run_cli(["init-db", "--db-path", str(db_path)], ROOT)
+            self.assertEqual(init_rc.returncode, 0, msg=init_rc.stdout + init_rc.stderr)
+
+            from src.web_server import create_http_server
+
+            server = create_http_server(db_path, host="127.0.0.1", port=0, default_recent_runs=5)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                port = int(server.server_address[1])
+                url = f"http://127.0.0.1:{port}/api/dashboard?recent_runs=0"
+                with self.assertRaises(urllib.error.HTTPError) as cm:
+                    urllib.request.urlopen(url, timeout=2)
+                self.assertEqual(cm.exception.code, 400)
+                body = cm.exception.read().decode("utf-8")
+                self.assertIn("recent_runs", body)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
 
     def test_smoke_run_success_writes_run_row(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
