@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 from datetime import date, datetime, timedelta
 from http import HTTPStatus
@@ -102,9 +103,8 @@ SIM_STOPWORDS = {
     "data",
 }
 
-
-def tokenize_for_similarity(text: str) -> set[str]:
-    tokens: set[str] = set()
+def token_counts_for_similarity(text: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
     for tok in SIM_TOKEN_REGEX.findall((text or "").lower()):
         if len(tok) < 3:
             continue
@@ -112,25 +112,64 @@ def tokenize_for_similarity(text: str) -> set[str]:
             continue
         if tok.isdigit():
             continue
-        tokens.add(tok)
-    return tokens
+        counts[tok] = counts.get(tok, 0) + 1
+    return counts
 
 
-def jaccard_similarity(a: set[str], b: set[str]) -> float:
-    if not a or not b:
+def _build_idf(doc_counts: list[dict[str, int]]) -> dict[str, float]:
+    df: dict[str, int] = {}
+    for counts in doc_counts:
+        for tok in counts.keys():
+            df[tok] = df.get(tok, 0) + 1
+    n_docs = max(1, len(doc_counts))
+    idf: dict[str, float] = {}
+    for tok, freq in df.items():
+        idf[tok] = math.log((n_docs + 1.0) / (freq + 1.0)) + 1.0
+    return idf
+
+
+def _tfidf_vector(counts: dict[str, int], idf: dict[str, float]) -> tuple[dict[str, float], float]:
+    vec: dict[str, float] = {}
+    norm2 = 0.0
+    for tok, c in counts.items():
+        w = math.log1p(float(c)) * float(idf.get(tok, 0.0))
+        if w <= 0:
+            continue
+        vec[tok] = w
+        norm2 += w * w
+    return vec, math.sqrt(norm2)
+
+
+def _cosine_similarity(a: dict[str, float], norm_a: float, b: dict[str, float], norm_b: float) -> float:
+    if norm_a <= 0.0 or norm_b <= 0.0:
         return 0.0
-    inter = len(a.intersection(b))
-    if inter <= 0:
-        return 0.0
-    union = len(a.union(b))
-    return float(inter) / float(union) if union else 0.0
+    if len(a) > len(b):
+        a, b = b, a
+        norm_a, norm_b = norm_b, norm_a
+    dot = 0.0
+    for tok, w in a.items():
+        wb = b.get(tok)
+        if wb is not None:
+            dot += w * wb
+    return dot / (norm_a * norm_b)
 
 
-def shared_terms(a: set[str], b: set[str], limit: int = 8) -> list[str]:
-    if not a or not b:
+def _top_shared_terms_by_weight(
+    vec_a: dict[str, float],
+    vec_b: dict[str, float],
+    *,
+    limit: int = 8,
+) -> list[str]:
+    if not vec_a or not vec_b:
         return []
-    out = sorted(a.intersection(b))
-    return out[: max(0, int(limit))]
+    items: list[tuple[float, str]] = []
+    for tok, wa in vec_a.items():
+        wb = vec_b.get(tok)
+        if wb is None:
+            continue
+        items.append((wa * wb, tok))
+    items.sort(reverse=True)
+    return [tok for _w, tok in items[: max(0, int(limit))]]
 
 INDEX_HTML = """<!doctype html>
 <html lang="en">
@@ -1818,6 +1857,40 @@ class DashboardHandler(BaseHTTPRequestHandler):
         text = (title + "\n" + abstract).strip()
         return text or title
 
+    def _concept_map(self, work: dict[str, Any]) -> dict[str, float]:
+        concepts = work.get("concepts") or []
+        if not isinstance(concepts, list):
+            return {}
+        out: dict[str, float] = {}
+        for item in concepts:
+            if not isinstance(item, dict):
+                continue
+            cid = str(item.get("id") or "").strip()
+            if not cid:
+                continue
+            try:
+                score = float(item.get("score") or 0.0)
+            except (TypeError, ValueError):
+                score = 0.0
+            if score <= 0:
+                continue
+            out[cid] = score
+        return out
+
+    def _concept_overlap(self, seed_concepts: dict[str, float], cand_concepts: dict[str, float]) -> float:
+        if not seed_concepts or not cand_concepts:
+            return 0.0
+        denom = sum(seed_concepts.values())
+        if denom <= 0:
+            return 0.0
+        overlap = 0.0
+        for cid, s in seed_concepts.items():
+            c = cand_concepts.get(cid)
+            if c is None:
+                continue
+            overlap += min(float(s), float(c))
+        return max(0.0, min(1.0, overlap / denom))
+
     def _handle_post_recursive_similar_references(self) -> None:
         body = self._read_json_body()
         if body is None:
@@ -1869,18 +1942,34 @@ class DashboardHandler(BaseHTTPRequestHandler):
         )
         t0 = time.time()
         seed_text = self._work_text_for_similarity(seed_work)
-        seed_tokens = tokenize_for_similarity(seed_text)
-        if not seed_tokens:
+        seed_counts = token_counts_for_similarity(seed_text)
+        if not seed_counts:
             self._send_json({"error": "Seed work has no usable abstract/title for similarity"}, HTTPStatus.BAD_REQUEST)
             return
 
         work_cache: dict[str, dict[str, Any]] = {seed_id: seed_work}
-        token_cache: dict[str, set[str]] = {seed_id: seed_tokens}
+        count_cache: dict[str, dict[str, int]] = {seed_id: seed_counts}
+        concept_cache: dict[str, dict[str, float]] = {seed_id: self._concept_map(seed_work)}
         frontier: list[str] = [seed_id]
         visited: set[str] = {seed_id}
         edges_selected: list[dict[str, Any]] = []
         layers: list[dict[str, Any]] = []
         fetch_count = 1
+
+        select_fields = ",".join(
+            [
+                "id",
+                "title",
+                "display_name",
+                "doi",
+                "publication_date",
+                "cited_by_count",
+                "primary_location",
+                "abstract_inverted_index",
+                "referenced_works",
+                "concepts",
+            ]
+        )
 
         for level in range(1, depth + 1):
             next_frontier: list[str] = []
@@ -1889,11 +1978,21 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 parent_work = work_cache.get(parent_id)
                 if not parent_work:
                     continue
+                parent_text = self._work_text_for_similarity(parent_work)
+                parent_counts = count_cache.get(parent_id)
+                if parent_counts is None:
+                    parent_counts = token_counts_for_similarity(parent_text)
+                    count_cache[parent_id] = parent_counts
+                parent_concepts = concept_cache.get(parent_id)
+                if parent_concepts is None:
+                    parent_concepts = self._concept_map(parent_work)
+                    concept_cache[parent_id] = parent_concepts
+
                 ref_list = parent_work.get("referenced_works") or []
                 if not isinstance(ref_list, list):
                     continue
 
-                candidates: list[tuple[str, float]] = []
+                ref_ids: list[str] = []
                 considered = 0
                 for raw in ref_list:
                     if considered >= max_references:
@@ -1901,32 +2000,73 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     rid = canonical_work_id(str(raw))
                     if not rid:
                         continue
+                    ref_ids.append(rid)
                     considered += 1
-                    if rid not in work_cache:
-                        try:
-                            work_cache[rid] = client.get_work_by_id(rid)
-                            fetch_count += 1
-                        except Exception as exc:
-                            LOGGER.warning("recursive-similar fetch failed rid=%s error=%s", rid, exc)
-                            continue
-                    if rid not in token_cache:
-                        token_cache[rid] = tokenize_for_similarity(self._work_text_for_similarity(work_cache[rid]))
-                    score = jaccard_similarity(seed_tokens, token_cache[rid])
-                    candidates.append((rid, score))
 
-                candidates.sort(key=lambda x: x[1], reverse=True)
-                selected = [item for item in candidates if item[1] >= min_score][:top_k]
-                for rid, score in selected:
+                missing = [rid for rid in ref_ids if rid not in work_cache]
+                if missing:
+                    try:
+                        fetched = client.get_works_by_ids(missing, select=select_fields)
+                        if fetched:
+                            work_cache.update(fetched)
+                            fetch_count += len(fetched)
+                    except Exception as exc:
+                        LOGGER.warning("recursive-similar bulk fetch failed count=%s error=%s", len(missing), exc)
+
+                cand_counts_list: list[dict[str, int]] = []
+                for rid in ref_ids:
+                    work = work_cache.get(rid)
+                    if not work:
+                        continue
+                    if rid not in count_cache:
+                        count_cache[rid] = token_counts_for_similarity(self._work_text_for_similarity(work))
+                    cand_counts_list.append(count_cache[rid])
+
+                # Build IDF over seed + parent + candidates, then score candidates.
+                idf = _build_idf([seed_counts, parent_counts] + cand_counts_list)
+                seed_vec, seed_norm = _tfidf_vector(seed_counts, idf)
+                parent_vec, parent_norm = _tfidf_vector(parent_counts, idf)
+                seed_concepts = concept_cache.get(seed_id, {})
+
+                scored: list[tuple[float, int, str, dict[str, Any], dict[str, float], float, float]] = []
+                for rid in ref_ids:
+                    work = work_cache.get(rid)
+                    if not work:
+                        continue
+                    cand_counts = count_cache.get(rid, {})
+                    cand_vec, cand_norm = _tfidf_vector(cand_counts, idf)
+                    seed_sim = _cosine_similarity(seed_vec, seed_norm, cand_vec, cand_norm)
+                    parent_sim = _cosine_similarity(parent_vec, parent_norm, cand_vec, cand_norm)
+                    cand_concepts = concept_cache.get(rid)
+                    if cand_concepts is None:
+                        cand_concepts = self._concept_map(work)
+                        concept_cache[rid] = cand_concepts
+                    concept_sim = self._concept_overlap(seed_concepts, cand_concepts)
+                    # Hybrid: keep global theme (seed) but allow local progression (parent).
+                    text_sim = 0.7 * float(seed_sim) + 0.3 * float(parent_sim)
+                    score = 0.85 * float(text_sim) + 0.15 * float(concept_sim)
+                    cited = work.get("cited_by_count")
+                    try:
+                        cited_int = int(cited) if cited is not None else 0
+                    except (TypeError, ValueError):
+                        cited_int = 0
+                    scored.append((float(score), cited_int, rid, work, cand_vec, float(seed_sim), float(parent_sim)))
+
+                scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+                selected = [item for item in scored if item[0] >= min_score][:top_k]
+                for score, _cited_int, rid, work, cand_vec, seed_sim, parent_sim in selected:
                     if rid not in visited:
                         visited.add(rid)
                         next_frontier.append(rid)
-                    terms = shared_terms(seed_tokens, token_cache.get(rid, set()), limit=8)
+                    terms = _top_shared_terms_by_weight(seed_vec, cand_vec, limit=8)
                     edges_selected.append(
                         {
                             "level": level,
                             "parent_paper_id": parent_id,
                             "paper_id": rid,
                             "score": round(float(score), 6),
+                            "seed_sim": round(float(seed_sim), 6),
+                            "parent_sim": round(float(parent_sim), 6),
                             "shared_terms": terms,
                         }
                     )
@@ -1936,7 +2076,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                             "parent_paper_id": parent_id,
                             "score": round(float(score), 4),
                             "shared_terms": terms,
-                            "work": self._serialize_work(work_cache[rid]),
+                            "work": self._serialize_work(work),
                         }
                     )
 

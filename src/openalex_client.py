@@ -98,6 +98,40 @@ class OpenAlexClient:
             raise ValueError(f"Invalid OpenAlex work id: {work_id}")
         return self._request_json(f"/works/{wid}")
 
+    def get_works_by_ids(
+        self,
+        work_ids: list[str],
+        *,
+        select: str | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        ids: list[str] = []
+        seen: set[str] = set()
+        for raw in work_ids:
+            wid = canonical_work_id(str(raw))
+            if not wid or wid in seen:
+                continue
+            seen.add(wid)
+            ids.append(wid)
+        if not ids:
+            return {}
+
+        results: dict[str, dict[str, Any]] = {}
+        chunk_size = 50  # keep URL length reasonable
+        for i in range(0, len(ids), chunk_size):
+            chunk = ids[i : i + chunk_size]
+            filter_str = "openalex_id:" + "|".join(chunk)
+            params: dict[str, Any] = {"filter": filter_str, "per-page": min(len(chunk), 200)}
+            if select:
+                params["select"] = select
+            data = self._request_json("/works", params=params)
+            for work in data.get("results", []) or []:
+                wid = canonical_work_id(work.get("id"))
+                if wid:
+                    results[wid] = work
+            if self.sleep_s > 0:
+                time.sleep(self.sleep_s)
+        return results
+
     def get_work_by_doi(self, doi: str) -> dict[str, Any] | None:
         clean_doi = doi.strip().lower()
         if clean_doi.startswith("https://doi.org/"):

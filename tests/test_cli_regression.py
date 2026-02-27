@@ -760,13 +760,15 @@ class TestCliRegression(unittest.TestCase):
                         return None
                     return works_by_id["WSEEDREC"]
 
-                def get_work_by_id(self, work_id: str) -> dict[str, object]:
-                    wid = work_id
-                    if wid.startswith("https://openalex.org/"):
-                        wid = wid.rsplit("/", 1)[-1]
-                    if wid not in works_by_id:
-                        raise ValueError(f"unknown work_id {work_id}")
-                    return works_by_id[wid]
+                def get_works_by_ids(self, work_ids: list[str], *, select: str | None = None) -> dict[str, dict[str, object]]:
+                    out: dict[str, dict[str, object]] = {}
+                    for raw in work_ids:
+                        wid = str(raw)
+                        if wid.startswith("https://openalex.org/"):
+                            wid = wid.rsplit("/", 1)[-1]
+                        if wid in works_by_id:
+                            out[wid] = works_by_id[wid]
+                    return out
 
             from src.web_server import create_http_server
 
