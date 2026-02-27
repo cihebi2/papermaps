@@ -372,7 +372,7 @@ INDEX_HTML = """<!doctype html>
 
     function esc(v) {
       if (v === null || v === undefined) return "-";
-      return String(v).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+      return String(v).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
     }
 
     function statusClass(status) {
@@ -389,7 +389,7 @@ INDEX_HTML = """<!doctype html>
         ["runs", "Runs"],
       ];
       cards.innerHTML = keys
-        .map(([key, label]) => `<div class="card"><div class="label">${label}</div><div class="value">${esc(counts[key] ?? 0)}</div></div>`)
+        .map(([key, label]) => `<div class="card"><div class="label">${label}</div><div class="value">${esc((counts && counts[key] !== undefined && counts[key] !== null) ? counts[key] : 0)}</div></div>`)
         .join("");
     }
 
@@ -620,7 +620,8 @@ INDEX_HTML = """<!doctype html>
         const payload = await res.json();
         if (!res.ok) throw new Error(payload.error || `HTTP ${res.status}`);
         const lines = [];
-        lines.push(`Seed: ${payload.seed?.paper_id || "-"} ${payload.seed?.title || "-"}`);
+        const seed = payload.seed || {};
+        lines.push(`Seed: ${seed.paper_id || "-"} ${seed.title || "-"}`);
         lines.push(`Topics: ${(payload.topics || []).join(", ") || "-"}`);
         lines.push(`Similar count: ${(payload.similar || []).length}`);
         for (const x of payload.similar || []) {
@@ -649,8 +650,9 @@ INDEX_HTML = """<!doctype html>
         }
         const lines = rows.map((row) => {
           const dois = (row.doi_list || []).join(", ");
-          const found = row.result_summary?.found ?? "-";
-          const failed = row.result_summary?.failed ?? "-";
+          const summary = row.result_summary || {};
+          const found = summary.found !== undefined && summary.found !== null ? summary.found : "-";
+          const failed = summary.failed !== undefined && summary.failed !== null ? summary.failed : "-";
           return `#${row.id} [${row.created_at}] DOIs: ${dois} | found=${found} failed=${failed}`;
         });
         savedSearchesResult.innerHTML = lines.map((x) => esc(x)).join("<br>");
