@@ -268,10 +268,178 @@ INDEX_HTML = """<!doctype html>
     .s-running { color: var(--run); background: rgba(139, 92, 246, 0.13); }
     .hint { margin-top: 10px; color: var(--muted); font-size: 12px; }
     .error { color: var(--err); margin-top: 8px; font-size: 13px; }
+    /* Recursive Similarity "Loom" (graph visualization) */
+    .rec-stage {
+      border: 1px dashed rgba(16, 42, 67, 0.25);
+      border-radius: 16px;
+      padding: 14px;
+      background:
+        radial-gradient(circle at 12% 18%, rgba(20, 184, 166, 0.12), transparent 44%),
+        radial-gradient(circle at 86% 28%, rgba(245, 158, 11, 0.14), transparent 42%),
+        linear-gradient(180deg, rgba(255, 255, 255, 0.72), rgba(255, 255, 255, 0.40));
+      box-shadow:
+        0 14px 42px rgba(16, 42, 67, 0.10),
+        inset 0 1px 0 rgba(255, 255, 255, 0.55);
+      position: relative;
+      min-height: 420px;
+    }
+    .rec-empty {
+      height: 100%;
+      border-radius: 14px;
+      padding: 18px 18px 16px;
+      border: 1px solid rgba(16, 42, 67, 0.10);
+      background:
+        repeating-linear-gradient(90deg, rgba(16, 42, 67, 0.06) 0, rgba(16, 42, 67, 0.06) 1px, transparent 1px, transparent 22px),
+        repeating-linear-gradient(0deg, rgba(16, 42, 67, 0.05) 0, rgba(16, 42, 67, 0.05) 1px, transparent 1px, transparent 22px),
+        linear-gradient(180deg, rgba(255, 255, 255, 0.75), rgba(255, 255, 255, 0.35));
+    }
+    .rec-empty-kicker { font-size: 12px; letter-spacing: 0.18em; text-transform: uppercase; color: rgba(16, 42, 67, 0.65); }
+    .rec-empty-title { margin-top: 8px; font-size: 18px; font-weight: 800; letter-spacing: 0.01em; }
+    .rec-empty-sub { margin-top: 6px; font-size: 13px; color: var(--muted); max-width: 64ch; }
+    .rec-head {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 10px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid rgba(16, 42, 67, 0.10);
+    }
+    .rec-head h3 { margin: 0; font-size: 16px; letter-spacing: 0.01em; }
+    .rec-meta { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; color: rgba(16, 42, 67, 0.72); font-size: 12px; }
+    .rec-pill { padding: 4px 9px; border-radius: 999px; border: 1px solid rgba(16, 42, 67, 0.14); background: rgba(255, 255, 255, 0.55); }
+    .rec-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .btn-ghost {
+      height: 34px;
+      padding: 0 10px;
+      border-radius: 12px;
+      border: 1px solid rgba(16, 42, 67, 0.18);
+      background: rgba(255, 255, 255, 0.55);
+      cursor: pointer;
+      font: inherit;
+      color: rgba(16, 42, 67, 0.88);
+    }
+    .btn-ghost:hover { background: rgba(255, 255, 255, 0.78); }
+    .btn-ghost:active { transform: translateY(1px); }
+    .rec-body { margin-top: 12px; display: grid; grid-template-columns: 290px 1fr; gap: 12px; align-items: start; }
+    .rec-side {
+      border: 1px solid rgba(16, 42, 67, 0.12);
+      border-radius: 14px;
+      padding: 12px;
+      background: rgba(255, 255, 255, 0.55);
+    }
+    .rec-side .k { font-size: 12px; letter-spacing: 0.16em; text-transform: uppercase; color: rgba(16, 42, 67, 0.62); }
+    .rec-detail { margin-top: 10px; font-size: 13px; color: rgba(16, 42, 67, 0.92); line-height: 1.4; }
+    .rec-detail a { color: rgba(47, 107, 168, 0.95); text-decoration: none; border-bottom: 1px solid rgba(47, 107, 168, 0.35); }
+    .rec-detail a:hover { border-bottom-color: rgba(47, 107, 168, 0.75); }
+    .rec-help { margin-top: 10px; font-size: 12px; color: var(--muted); }
+    .rec-loom {
+      border: 1px solid rgba(16, 42, 67, 0.12);
+      border-radius: 14px;
+      background:
+        radial-gradient(circle at 30% 18%, rgba(16, 185, 129, 0.10), transparent 44%),
+        radial-gradient(circle at 70% 40%, rgba(251, 191, 36, 0.11), transparent 46%),
+        repeating-linear-gradient(90deg, rgba(16, 42, 67, 0.06) 0, rgba(16, 42, 67, 0.06) 1px, transparent 1px, transparent 26px),
+        repeating-linear-gradient(0deg, rgba(16, 42, 67, 0.05) 0, rgba(16, 42, 67, 0.05) 1px, transparent 1px, transparent 26px),
+        rgba(255, 255, 255, 0.35);
+      overflow: auto;
+      height: 360px;
+      position: relative;
+    }
+    .rec-loom-inner { position: relative; padding: 14px; min-height: 100%; }
+    .rec-cols { position: relative; display: flex; align-items: flex-start; gap: 12px; z-index: 2; }
+    .rec-col { min-width: 260px; max-width: 260px; }
+    .rec-col-title {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 8px;
+      margin: 0 0 10px;
+      padding: 8px 10px;
+      border-radius: 12px;
+      border: 1px solid rgba(16, 42, 67, 0.14);
+      background: rgba(255, 255, 255, 0.55);
+      font-size: 13px;
+      font-weight: 700;
+    }
+    .rec-col-title span { font-weight: 600; color: rgba(16, 42, 67, 0.65); font-size: 12px; }
+    .rec-list { display: flex; flex-direction: column; gap: 10px; }
+    .rec-node {
+      border-radius: 14px;
+      border: 1px solid rgba(16, 42, 67, 0.14);
+      background: rgba(255, 255, 255, 0.72);
+      padding: 10px 10px 10px 10px;
+      cursor: pointer;
+      box-shadow: 0 10px 22px rgba(16, 42, 67, 0.06);
+      transform: translateZ(0);
+      transition: transform 180ms ease, box-shadow 180ms ease, border-color 180ms ease;
+    }
+    .rec-node:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 16px 34px rgba(16, 42, 67, 0.10);
+      border-color: rgba(16, 42, 67, 0.24);
+    }
+    .rec-node.is-focus { outline: 2px solid rgba(20, 184, 166, 0.55); outline-offset: 2px; }
+    .rec-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+    .rec-title { font-size: 13px; font-weight: 800; line-height: 1.18; letter-spacing: 0.01em; }
+    .rec-mini { margin-top: 4px; font-size: 12px; color: rgba(16, 42, 67, 0.68); }
+    .rec-badge {
+      flex: 0 0 auto;
+      min-width: 44px;
+      height: 28px;
+      padding: 0 8px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 999px;
+      border: 1px solid rgba(16, 42, 67, 0.14);
+      background: rgba(255, 255, 255, 0.65);
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: 0.02em;
+    }
+    .rec-tags { margin-top: 8px; display: flex; gap: 6px; flex-wrap: wrap; }
+    .rec-tag {
+      padding: 3px 7px;
+      border-radius: 999px;
+      border: 1px solid rgba(16, 42, 67, 0.12);
+      background: rgba(255, 255, 255, 0.50);
+      font-size: 11px;
+      color: rgba(16, 42, 67, 0.72);
+      white-space: nowrap;
+    }
+    .rec-edges { position: absolute; inset: 0; z-index: 1; pointer-events: none; }
+    .rec-edge { fill: none; stroke: rgba(16, 42, 67, 0.18); stroke-width: 1.2; opacity: 0.70; }
+    .rec-edge.is-hot { opacity: 0.98; stroke-width: 1.8; }
+    .rec-edge.is-dim { opacity: 0.18; }
+    .rec-raw {
+      margin-top: 12px;
+      padding: 12px;
+      border-radius: 14px;
+      border: 1px solid rgba(16, 42, 67, 0.12);
+      background: rgba(255, 255, 255, 0.60);
+      overflow: auto;
+      max-height: 220px;
+      font-size: 12px;
+    }
+    .rec-spinner {
+      width: 18px;
+      height: 18px;
+      border-radius: 999px;
+      border: 2px solid rgba(16, 42, 67, 0.18);
+      border-top-color: rgba(20, 184, 166, 0.78);
+      animation: recspin 900ms linear infinite;
+      display: inline-block;
+      vertical-align: -3px;
+      margin-right: 8px;
+    }
+    @keyframes recspin { to { transform: rotate(360deg); } }
     @media (max-width: 700px) {
       h1 { font-size: 24px; }
       .value { font-size: 22px; }
       th, td { padding: 8px 9px; }
+      .rec-stage { min-height: 360px; }
+      .rec-body { grid-template-columns: 1fr; }
+      .rec-col { min-width: 240px; max-width: 240px; }
     }
   </style>
 </head>
@@ -381,7 +549,13 @@ INDEX_HTML = """<!doctype html>
           <button id="recursiveBtn" type="button">Expand (depth)</button>
         </div>
         <label>Recursive Result</label>
-        <div id="recursiveResult" class="sub">No recursive expansion yet.</div>
+        <div id="recursiveResult" class="rec-stage">
+          <div class="rec-empty">
+            <div class="rec-empty-kicker">Papermap Loom</div>
+            <div class="rec-empty-title">No map yet.</div>
+            <div class="rec-empty-sub">Run an expansion to weave a layered trail of similar references. Hover cards to see connections, click a card for details.</div>
+          </div>
+        </div>
       </div>
     </section>
     <section class="panel">
@@ -565,6 +739,541 @@ INDEX_HTML = """<!doctype html>
           </tr>`).join("")
         : "<tr><td colspan='6'>No watch targets found.</td></tr>";
       watchTable.innerHTML = head + body;
+    }
+
+    // ---- Recursive Loom (graph visualization) ----
+    let recState = null;
+    let recResizeBound = false;
+
+    function clamp01(x) {
+      const n = Number(x);
+      if (Number.isNaN(n)) return 0;
+      return Math.max(0, Math.min(1, n));
+    }
+
+    function fmtScore(x) {
+      const n = Number(x);
+      if (Number.isNaN(n)) return "-";
+      return n.toFixed(2);
+    }
+
+    function scoreStroke(score) {
+      // Warm-to-cool ink: low score = slate, high score = teal.
+      const s = clamp01(score);
+      const hue = 210 - Math.round(55 * s); // 210 -> 155
+      const alpha = 0.35 + 0.55 * s;
+      return `hsla(${hue}, 70%, 42%, ${alpha})`;
+    }
+
+    function firstNonEmpty(arr) {
+      if (!arr || !arr.length) return null;
+      for (const item of arr) {
+        if (item) return item;
+      }
+      return null;
+    }
+
+    function bestIncomingEdge(node) {
+      const incoming = (node && node.incoming) ? node.incoming : [];
+      if (!incoming.length) return null;
+      let best = incoming[0];
+      for (const e of incoming) {
+        if ((e.score || 0) > (best.score || 0)) best = e;
+      }
+      return best;
+    }
+
+    function renderRecursiveEmptyStage() {
+      recursiveResult.innerHTML = `
+        <div class="rec-empty">
+          <div class="rec-empty-kicker">Papermap Loom</div>
+          <div class="rec-empty-title">No map yet.</div>
+          <div class="rec-empty-sub">Run an expansion to weave a layered trail of similar references. Hover cards to see connections, click a card for details.</div>
+        </div>
+      `;
+      recState = null;
+    }
+
+    function renderRecursiveLoadingStage(metaText) {
+      recursiveResult.innerHTML = `
+        <div class="rec-empty">
+          <div class="rec-empty-kicker"><span class="rec-spinner"></span>Building map</div>
+          <div class="rec-empty-title">Fetching references and scoring similarity…</div>
+          <div class="rec-empty-sub">${esc(metaText || "This can take a bit depending on depth and refs per paper. Keep this tab open.")}</div>
+        </div>
+      `;
+    }
+
+    function renderRecursiveErrorStage(message) {
+      recursiveResult.innerHTML = `
+        <div class="rec-empty">
+          <div class="rec-empty-kicker" style="color: rgba(180, 35, 24, 0.90);">Error</div>
+          <div class="rec-empty-title">Recursive expansion failed</div>
+          <div class="rec-empty-sub">${esc(message || "Unknown error")}</div>
+        </div>
+      `;
+    }
+
+    function buildRecursiveGraphState(payload) {
+      const seed = payload.seed || {};
+      const seedId = seed.paper_id || "";
+      const nodes = {};
+      const edges = [];
+
+      if (seedId) {
+        nodes[seedId] = {
+          id: seedId,
+          work: seed,
+          min_level: 0,
+          best_score: 1.0,
+          incoming: [],
+          outgoing: [],
+          shared_terms: [],
+        };
+      }
+
+      let maxLevel = 0;
+      const layers = payload.layers || [];
+      for (const layer of layers) {
+        const level = Number(layer.level || 0);
+        if (level > maxLevel) maxLevel = level;
+        const arr = layer.nodes || [];
+        for (const n of arr) {
+          const parent = n.parent_paper_id || "";
+          const work = n.work || {};
+          const id = work.paper_id || "";
+          if (!id) continue;
+          const score = (n.score !== undefined && n.score !== null) ? Number(n.score) : 0;
+          const shared = Array.isArray(n.shared_terms) ? n.shared_terms : [];
+          const edge = { from: parent, to: id, level, score: clamp01(score), shared_terms: shared };
+          edges.push(edge);
+
+          if (!nodes[id]) {
+            nodes[id] = {
+              id,
+              work,
+              min_level: level,
+              best_score: clamp01(score),
+              incoming: [],
+              outgoing: [],
+              shared_terms: [],
+            };
+          }
+          const node = nodes[id];
+          node.work = work;
+          node.incoming.push(edge);
+          if (level < node.min_level) node.min_level = level;
+          if (clamp01(score) > node.best_score) node.best_score = clamp01(score);
+
+          // Track "best" shared terms for quick scanning on cards.
+          if (shared.length) {
+            const bestEdge = bestIncomingEdge(node);
+            const bestTerms = bestEdge ? bestEdge.shared_terms : [];
+            node.shared_terms = bestTerms || [];
+          }
+
+          if (parent) {
+            if (!nodes[parent]) {
+              nodes[parent] = {
+                id: parent,
+                work: { paper_id: parent, title: parent },
+                min_level: Math.max(0, level - 1),
+                best_score: 0,
+                incoming: [],
+                outgoing: [],
+                shared_terms: [],
+              };
+            }
+            nodes[parent].outgoing.push(edge);
+          }
+        }
+      }
+
+      // Choose a single display level per paper: the earliest level it appears.
+      const displayLevel = {};
+      for (const [pid, node] of Object.entries(nodes)) {
+        displayLevel[pid] = node.min_level || 0;
+      }
+
+      return { payload, seed, seedId, nodes, edges, maxLevel, displayLevel };
+    }
+
+    function renderRecursiveGraph(payload) {
+      recState = buildRecursiveGraphState(payload);
+      const seed = recState.seed || {};
+      const seedId = recState.seedId || "";
+
+      const metaBits = [];
+      metaBits.push(`<span class="rec-pill">seed: ${esc(seedId || "-")}</span>`);
+      metaBits.push(`<span class="rec-pill">depth: ${esc(payload.depth)}</span>`);
+      metaBits.push(`<span class="rec-pill">selected: ${esc((recState.edges || []).length)}</span>`);
+      metaBits.push(`<span class="rec-pill">fetched: ${esc(payload.fetch_count)}</span>`);
+      metaBits.push(`<span class="rec-pill">elapsed: ${esc(payload.elapsed_ms)}ms</span>`);
+
+      recursiveResult.innerHTML = `
+        <div class="rec-head">
+          <div>
+            <h3>Recursive Similarity Loom</h3>
+            <div class="rec-meta">${metaBits.join("")}</div>
+          </div>
+          <div class="rec-actions">
+            <button id="recRedrawBtn" class="btn-ghost" type="button">Redraw edges</button>
+            <button id="recRawBtn" class="btn-ghost" type="button">Raw JSON</button>
+            <button id="recClearBtn" class="btn-ghost" type="button">Clear</button>
+          </div>
+        </div>
+        <div class="rec-body">
+          <div class="rec-side">
+            <div class="k">Selection</div>
+            <div id="recDetail" class="rec-detail">Click a paper card to inspect why it was selected.</div>
+            <div class="rec-help">Tip: start with depth=3, refs=10–30, top_k=2–5, then raise min_score until the map reads clean.</div>
+          </div>
+          <div class="rec-loom" id="recLoom">
+            <div class="rec-loom-inner" id="recLoomInner">
+              <svg class="rec-edges" id="recEdges" aria-hidden="true"></svg>
+              <div class="rec-cols" id="recCols"></div>
+            </div>
+          </div>
+        </div>
+        <pre id="recRaw" class="rec-raw" style="display:none;"></pre>
+      `;
+
+      const colsEl = document.getElementById("recCols");
+      if (!colsEl) return;
+
+      function mkCol(title, countText) {
+        const col = document.createElement("div");
+        col.className = "rec-col";
+        const h = document.createElement("div");
+        h.className = "rec-col-title";
+        const t = document.createElement("div");
+        t.textContent = title;
+        const c = document.createElement("span");
+        c.textContent = countText || "";
+        h.appendChild(t);
+        h.appendChild(c);
+        const list = document.createElement("div");
+        list.className = "rec-list";
+        col.appendChild(h);
+        col.appendChild(list);
+        return { col, list };
+      }
+
+      function mkNodeCard(node, isSeed) {
+        const w = node.work || {};
+        const el = document.createElement("div");
+        el.className = "rec-node";
+        el.dataset.paperId = node.id;
+        el.style.borderTop = `3px solid ${scoreStroke(isSeed ? 1.0 : node.best_score)}`;
+
+        const top = document.createElement("div");
+        top.className = "rec-top";
+        const left = document.createElement("div");
+        const ttl = document.createElement("div");
+        ttl.className = "rec-title";
+        ttl.textContent = w.title || w.paper_id || node.id;
+        const mini = document.createElement("div");
+        mini.className = "rec-mini";
+        const bits = [];
+        if (w.published_date) bits.push(String(w.published_date).slice(0, 4));
+        if (w.journal) bits.push(w.journal);
+        if (w.cited_by_count !== undefined && w.cited_by_count !== null) bits.push(`cited_by=${w.cited_by_count}`);
+        mini.textContent = bits.join(" • ");
+        left.appendChild(ttl);
+        left.appendChild(mini);
+
+        const badge = document.createElement("div");
+        badge.className = "rec-badge";
+        badge.textContent = isSeed ? "seed" : fmtScore(node.best_score);
+        badge.title = isSeed ? "seed" : `score=${fmtScore(node.best_score)}`;
+
+        top.appendChild(left);
+        top.appendChild(badge);
+        el.appendChild(top);
+
+        const tags = document.createElement("div");
+        tags.className = "rec-tags";
+        const terms = (node.shared_terms || []).slice(0, 4);
+        if (terms.length === 0) {
+          const tag = document.createElement("div");
+          tag.className = "rec-tag";
+          tag.textContent = isSeed ? "starting point" : "no shared terms";
+          tags.appendChild(tag);
+        } else {
+          for (const term of terms) {
+            const tag = document.createElement("div");
+            tag.className = "rec-tag";
+            tag.textContent = term;
+            tags.appendChild(tag);
+          }
+        }
+        el.appendChild(tags);
+
+        el.addEventListener("mouseenter", () => focusRecursiveNode(node.id));
+        el.addEventListener("mouseleave", () => clearRecursiveFocus());
+        el.addEventListener("click", () => showRecursiveDetail(node.id));
+        return el;
+      }
+
+      // Build columns by earliest (min) level.
+      const maxLevel = Math.max(0, recState.maxLevel || 0);
+      for (let level = 0; level <= maxLevel; level++) {
+        const title = level === 0 ? "Seed" : `L${level}`;
+        const ids = [];
+        for (const [pid, node] of Object.entries(recState.nodes)) {
+          if (!pid) continue;
+          if (pid === seedId && level !== 0) continue;
+          if ((recState.displayLevel[pid] || 0) !== level) continue;
+          if (level === 0 && pid !== seedId) continue;
+          ids.push(pid);
+        }
+        const col = mkCol(title, `${ids.length}`);
+        colsEl.appendChild(col.col);
+
+        if (level === 0) {
+          const seedNode = recState.nodes[seedId];
+          if (seedNode) col.list.appendChild(mkNodeCard(seedNode, true));
+          continue;
+        }
+
+        ids.sort((a, b) => {
+          const na = recState.nodes[a] || {};
+          const nb = recState.nodes[b] || {};
+          const sa = Number(na.best_score || 0);
+          const sb = Number(nb.best_score || 0);
+          if (sb !== sa) return sb - sa;
+          const ca = Number(((na.work || {}).cited_by_count) || 0);
+          const cb = Number(((nb.work || {}).cited_by_count) || 0);
+          return cb - ca;
+        });
+        for (const pid of ids) {
+          const node = recState.nodes[pid];
+          if (!node) continue;
+          col.list.appendChild(mkNodeCard(node, false));
+        }
+      }
+
+      // Actions
+      const rawBtn = document.getElementById("recRawBtn");
+      const clearBtn = document.getElementById("recClearBtn");
+      const redrawBtn = document.getElementById("recRedrawBtn");
+      const rawEl = document.getElementById("recRaw");
+      if (rawEl) rawEl.textContent = JSON.stringify(payload, null, 2);
+      if (rawBtn && rawEl) {
+        rawBtn.addEventListener("click", () => {
+          rawEl.style.display = rawEl.style.display === "none" ? "block" : "none";
+        });
+      }
+      if (clearBtn) clearBtn.addEventListener("click", () => renderRecursiveEmptyStage());
+      if (redrawBtn) redrawBtn.addEventListener("click", () => drawRecursiveEdges());
+
+      if (!recResizeBound) {
+        recResizeBound = true;
+        window.addEventListener("resize", () => {
+          if (recState) drawRecursiveEdges();
+        });
+      }
+
+      // Initial draw after layout.
+      setTimeout(() => drawRecursiveEdges(), 60);
+      setTimeout(() => drawRecursiveEdges(), 240);
+      showRecursiveDetail(seedId);
+    }
+
+    function focusRecursiveNode(paperId) {
+      const stage = document.getElementById("recursiveResult");
+      const svg = document.getElementById("recEdges");
+      if (!stage || !svg || !recState) return;
+      const node = recState.nodes[paperId];
+      if (!node) return;
+      const hot = {};
+      hot[paperId] = true;
+      for (const e of node.incoming || []) {
+        if (e.from) hot[e.from] = true;
+        if (e.to) hot[e.to] = true;
+      }
+      for (const e of node.outgoing || []) {
+        if (e.from) hot[e.from] = true;
+        if (e.to) hot[e.to] = true;
+      }
+
+      for (const card of stage.querySelectorAll(".rec-node")) {
+        const id = card.dataset.paperId || "";
+        card.classList.toggle("is-focus", Boolean(hot[id]));
+      }
+      for (const p of svg.querySelectorAll("path.rec-edge")) {
+        const from = p.dataset.from || "";
+        const to = p.dataset.to || "";
+        const on = Boolean(hot[from] || hot[to]);
+        p.classList.toggle("is-hot", on);
+        p.classList.toggle("is-dim", !on);
+      }
+    }
+
+    function clearRecursiveFocus() {
+      const stage = document.getElementById("recursiveResult");
+      const svg = document.getElementById("recEdges");
+      if (!stage || !svg) return;
+      for (const card of stage.querySelectorAll(".rec-node")) {
+        card.classList.remove("is-focus");
+      }
+      for (const p of svg.querySelectorAll("path.rec-edge")) {
+        p.classList.remove("is-hot");
+        p.classList.remove("is-dim");
+      }
+    }
+
+    function showRecursiveDetail(paperId) {
+      const detail = document.getElementById("recDetail");
+      if (!detail || !recState) return;
+      const node = recState.nodes[paperId];
+      if (!node) return;
+      const w = node.work || {};
+      const title = w.title || w.paper_id || node.id;
+
+      detail.textContent = "";
+      const h = document.createElement("div");
+      h.style.fontWeight = "800";
+      h.style.fontSize = "13px";
+      h.textContent = title;
+      detail.appendChild(h);
+
+      const pillRow = document.createElement("div");
+      pillRow.style.marginTop = "8px";
+      const pillA = document.createElement("span");
+      pillA.className = "rec-pill";
+      pillA.textContent = `level: ${node.min_level || 0}`;
+      const pillB = document.createElement("span");
+      pillB.className = "rec-pill";
+      pillB.style.marginLeft = "6px";
+      pillB.textContent = paperId === (recState.seedId || "") ? "seed" : `score: ${fmtScore(node.best_score)}`;
+      pillRow.appendChild(pillA);
+      pillRow.appendChild(pillB);
+      detail.appendChild(pillRow);
+
+      const linkRow = document.createElement("div");
+      linkRow.style.marginTop = "8px";
+      const links = [];
+      if (w.doi) {
+        const a = document.createElement("a");
+        a.href = `https://doi.org/${w.doi}`;
+        a.target = "_blank";
+        a.rel = "noopener";
+        a.textContent = "DOI";
+        links.push(a);
+      }
+      if (w.paper_id) {
+        const a = document.createElement("a");
+        a.href = `https://openalex.org/${w.paper_id}`;
+        a.target = "_blank";
+        a.rel = "noopener";
+        a.textContent = "OpenAlex";
+        links.push(a);
+      }
+      if (links.length) {
+        for (let i = 0; i < links.length; i++) {
+          if (i > 0) linkRow.appendChild(document.createTextNode(" • "));
+          linkRow.appendChild(links[i]);
+        }
+        detail.appendChild(linkRow);
+      }
+
+      if (w.doi) {
+        const btnRow = document.createElement("div");
+        btnRow.style.marginTop = "10px";
+        const btn = document.createElement("button");
+        btn.className = "btn-ghost";
+        btn.type = "button";
+        btn.textContent = "Use DOI as seed";
+        btn.addEventListener("click", () => {
+          doiInput.value = w.doi;
+          relatedDoiInput.value = w.doi;
+          similarDoiInput.value = w.doi;
+          recursiveDoiInput.value = w.doi;
+        });
+        btnRow.appendChild(btn);
+        detail.appendChild(btnRow);
+      }
+
+      const incoming = (node.incoming || []).slice().sort((a, b) => (b.score || 0) - (a.score || 0));
+      if (incoming.length) {
+        const why = document.createElement("div");
+        why.style.marginTop = "12px";
+        why.style.fontWeight = "700";
+        why.style.fontSize = "12px";
+        why.style.letterSpacing = "0.12em";
+        why.style.textTransform = "uppercase";
+        why.style.color = "rgba(16, 42, 67, 0.62)";
+        why.textContent = "Why selected";
+        detail.appendChild(why);
+
+        for (const e of incoming.slice(0, 6)) {
+          const row = document.createElement("div");
+          row.style.marginTop = "8px";
+          row.style.paddingTop = "8px";
+          row.style.borderTop = "1px solid rgba(16, 42, 67, 0.10)";
+          const parentNode = recState.nodes[e.from] || null;
+          const parentTitle = parentNode ? ((parentNode.work || {}).title || e.from) : (e.from || "-");
+          const head = document.createElement("div");
+          head.textContent = `score=${fmtScore(e.score)} • parent=${parentTitle}`;
+          row.appendChild(head);
+          const terms = (e.shared_terms || []).slice(0, 10).join(", ");
+          if (terms) {
+            const t = document.createElement("div");
+            t.style.marginTop = "4px";
+            t.style.color = "rgba(16, 42, 67, 0.72)";
+            t.textContent = `shared_terms: ${terms}`;
+            row.appendChild(t);
+          }
+          detail.appendChild(row);
+        }
+      }
+    }
+
+    function drawRecursiveEdges() {
+      const svg = document.getElementById("recEdges");
+      const inner = document.getElementById("recLoomInner");
+      if (!svg || !inner || !recState) return;
+
+      const nodeEls = {};
+      for (const el of inner.querySelectorAll(".rec-node")) {
+        const pid = el.dataset.paperId || "";
+        if (pid) nodeEls[pid] = el;
+      }
+
+      const innerRect = inner.getBoundingClientRect();
+      const w = Math.max(inner.scrollWidth, 200);
+      const h = Math.max(inner.scrollHeight, 200);
+      svg.setAttribute("width", String(w));
+      svg.setAttribute("height", String(h));
+      svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
+      svg.innerHTML = "";
+
+      function anchorLeft(el) {
+        const r = el.getBoundingClientRect();
+        return { x: (r.left - innerRect.left), y: (r.top - innerRect.top) + (r.height / 2) };
+      }
+      function anchorRight(el) {
+        const r = el.getBoundingClientRect();
+        return { x: (r.right - innerRect.left), y: (r.top - innerRect.top) + (r.height / 2) };
+      }
+
+      const ns = "http://www.w3.org/2000/svg";
+      for (const e of recState.edges || []) {
+        const fromEl = nodeEls[e.from || ""];
+        const toEl = nodeEls[e.to || ""];
+        if (!fromEl || !toEl) continue;
+        const a = anchorRight(fromEl);
+        const b = anchorLeft(toEl);
+        const dx = Math.max(60, Math.min(150, Math.abs(b.x - a.x) * 0.45));
+        const path = document.createElementNS(ns, "path");
+        path.setAttribute("d", `M ${a.x} ${a.y} C ${a.x + dx} ${a.y}, ${b.x - dx} ${b.y}, ${b.x} ${b.y}`);
+        path.setAttribute("class", "rec-edge");
+        path.dataset.from = e.from || "";
+        path.dataset.to = e.to || "";
+        path.style.stroke = scoreStroke(e.score || 0);
+        svg.appendChild(path);
+      }
     }
 
     async function loadData() {
@@ -780,10 +1489,9 @@ INDEX_HTML = """<!doctype html>
     }
 
     async function expandRecursiveSimilarReferences() {
-      recursiveResult.textContent = "";
       const doi = recursiveDoiInput.value.trim();
       if (!doi) {
-        recursiveResult.textContent = "Please fill seed DOI.";
+        renderRecursiveErrorStage("Please fill seed DOI.");
         return;
       }
       const depth = Math.max(1, Number(recursiveDepthInput.value || 3));
@@ -794,6 +1502,7 @@ INDEX_HTML = """<!doctype html>
       recursiveRefsInput.value = String(maxRefs);
       recursiveTopKInput.value = String(topK);
       recursiveMinScoreInput.value = String(minScore);
+      renderRecursiveLoadingStage(`seed=${doi} depth=${depth} refs=${maxRefs} top_k=${topK} min_score=${minScore}`);
       try {
         const res = await fetch("/api/works/recursive-similar-references", {
           method: "POST",
@@ -809,27 +1518,10 @@ INDEX_HTML = """<!doctype html>
         });
         const payload = await res.json();
         if (!res.ok) throw new Error(payload.error || `HTTP ${res.status}`);
-        const lines = [];
-        const seed = payload.seed || {};
-        lines.push(`Seed: ${seed.paper_id || "-"} ${seed.title || "-"}`);
-        const layers = payload.layers || [];
-        for (const layer of layers) {
-          const level = layer.level;
-          const nodes = layer.nodes || [];
-          lines.push(`Level ${level}: ${nodes.length} selected`);
-          for (const node of nodes) {
-            const work = node.work || {};
-            const score = node.score !== undefined && node.score !== null ? node.score : "-";
-            const parent = node.parent_paper_id || "-";
-            const shared = (node.shared_terms || []).join(", ");
-            lines.push(`- score=${score} parent=${parent} -> ${work.paper_id || "-"} ${work.title || "-"}`);
-            if (shared) lines.push(`  shared_terms: ${shared}`);
-          }
-        }
-        recursiveResult.innerHTML = lines.map((x) => esc(x)).join("<br>");
+        renderRecursiveGraph(payload);
         await loadData();
       } catch (err) {
-        recursiveResult.textContent = `Recursive expansion failed: ${err}`;
+        renderRecursiveErrorStage(String(err));
       }
     }
 
