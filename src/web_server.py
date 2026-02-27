@@ -15,7 +15,7 @@ import urllib.request
 
 try:
     from .db_init import init_db
-    from .openalex_client import OpenAlexClient, canonical_work_id
+    from .openalex_client import OpenAlexClient, canonical_work_id, reconstruct_abstract
     from .storage import (
         add_alert_if_new,
         add_saved_search,
@@ -35,7 +35,7 @@ try:
     )
 except ImportError:
     from db_init import init_db
-    from openalex_client import OpenAlexClient, canonical_work_id
+    from openalex_client import OpenAlexClient, canonical_work_id, reconstruct_abstract
     from storage import (
         add_alert_if_new,
         add_saved_search,
@@ -56,6 +56,81 @@ except ImportError:
 
 LOGGER = logging.getLogger(__name__)
 DOI_REGEX = re.compile(r"10\.\d{4,9}/[-._;()/:A-Za-z0-9]+$")
+SIM_TOKEN_REGEX = re.compile(r"[a-z0-9]+")
+SIM_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "by",
+    "for",
+    "from",
+    "has",
+    "have",
+    "in",
+    "is",
+    "it",
+    "its",
+    "of",
+    "on",
+    "or",
+    "our",
+    "such",
+    "that",
+    "the",
+    "their",
+    "this",
+    "to",
+    "was",
+    "were",
+    "with",
+    "we",
+    "they",
+    "these",
+    "those",
+    "using",
+    "use",
+    "used",
+    "method",
+    "methods",
+    "results",
+    "result",
+    "study",
+    "data",
+}
+
+
+def tokenize_for_similarity(text: str) -> set[str]:
+    tokens: set[str] = set()
+    for tok in SIM_TOKEN_REGEX.findall((text or "").lower()):
+        if len(tok) < 3:
+            continue
+        if tok in SIM_STOPWORDS:
+            continue
+        if tok.isdigit():
+            continue
+        tokens.add(tok)
+    return tokens
+
+
+def jaccard_similarity(a: set[str], b: set[str]) -> float:
+    if not a or not b:
+        return 0.0
+    inter = len(a.intersection(b))
+    if inter <= 0:
+        return 0.0
+    union = len(a.union(b))
+    return float(inter) / float(union) if union else 0.0
+
+
+def shared_terms(a: set[str], b: set[str], limit: int = 8) -> list[str]:
+    if not a or not b:
+        return []
+    out = sorted(a.intersection(b))
+    return out[: max(0, int(limit))]
 
 INDEX_HTML = """<!doctype html>
 <html lang="en">
@@ -249,6 +324,28 @@ INDEX_HTML = """<!doctype html>
       </div>
     </section>
     <section class="panel">
+      <h2>Recursive Similar References</h2>
+      <div style="padding:12px 14px; display:grid; grid-template-columns: 170px 1fr; gap:10px; align-items:start;">
+        <label for="recursiveDoiInput">Seed DOI</label>
+        <input id="recursiveDoiInput" type="text" placeholder="10.xxxx/...">
+        <label for="recursiveDepthInput">Depth</label>
+        <input id="recursiveDepthInput" type="number" min="1" max="5" value="3">
+        <label for="recursiveRefsInput">Refs per paper</label>
+        <input id="recursiveRefsInput" type="number" min="1" max="50" value="10">
+        <label for="recursiveTopKInput">Top K per paper</label>
+        <input id="recursiveTopKInput" type="number" min="1" max="10" value="2">
+        <label for="recursiveMinScoreInput">Min score</label>
+        <input id="recursiveMinScoreInput" type="number" min="0" max="1" step="0.01" value="0.08">
+        <span></span>
+        <div>
+          <label><input id="saveRecursiveData" type="checkbox" checked> Save to graph</label>
+          <button id="recursiveBtn" type="button">Expand (depth)</button>
+        </div>
+        <label>Recursive Result</label>
+        <div id="recursiveResult" class="sub">No recursive expansion yet.</div>
+      </div>
+    </section>
+    <section class="panel">
       <h2>Saved Searches</h2>
       <div style="padding:12px 14px; display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
         <label for="savedLimitInput">Limit</label>
@@ -350,6 +447,14 @@ INDEX_HTML = """<!doctype html>
     const saveSimilarData = document.getElementById("saveSimilarData");
     const similarBtn = document.getElementById("similarBtn");
     const similarResult = document.getElementById("similarResult");
+    const recursiveDoiInput = document.getElementById("recursiveDoiInput");
+    const recursiveDepthInput = document.getElementById("recursiveDepthInput");
+    const recursiveRefsInput = document.getElementById("recursiveRefsInput");
+    const recursiveTopKInput = document.getElementById("recursiveTopKInput");
+    const recursiveMinScoreInput = document.getElementById("recursiveMinScoreInput");
+    const saveRecursiveData = document.getElementById("saveRecursiveData");
+    const recursiveBtn = document.getElementById("recursiveBtn");
+    const recursiveResult = document.getElementById("recursiveResult");
     const savedLimitInput = document.getElementById("savedLimitInput");
     const savedRefreshBtn = document.getElementById("savedRefreshBtn");
     const savedSearchesResult = document.getElementById("savedSearchesResult");
@@ -635,6 +740,60 @@ INDEX_HTML = """<!doctype html>
       }
     }
 
+    async function expandRecursiveSimilarReferences() {
+      recursiveResult.textContent = "";
+      const doi = recursiveDoiInput.value.trim();
+      if (!doi) {
+        recursiveResult.textContent = "Please fill seed DOI.";
+        return;
+      }
+      const depth = Math.max(1, Number(recursiveDepthInput.value || 3));
+      const maxRefs = Math.max(1, Number(recursiveRefsInput.value || 10));
+      const topK = Math.max(1, Number(recursiveTopKInput.value || 2));
+      const minScore = Math.max(0, Number(recursiveMinScoreInput.value || 0.08));
+      recursiveDepthInput.value = String(depth);
+      recursiveRefsInput.value = String(maxRefs);
+      recursiveTopKInput.value = String(topK);
+      recursiveMinScoreInput.value = String(minScore);
+      try {
+        const res = await fetch("/api/works/recursive-similar-references", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            doi,
+            depth,
+            max_references: maxRefs,
+            top_k: topK,
+            min_score: minScore,
+            save: Boolean(saveRecursiveData.checked),
+          }),
+        });
+        const payload = await res.json();
+        if (!res.ok) throw new Error(payload.error || `HTTP ${res.status}`);
+        const lines = [];
+        const seed = payload.seed || {};
+        lines.push(`Seed: ${seed.paper_id || "-"} ${seed.title || "-"}`);
+        const layers = payload.layers || [];
+        for (const layer of layers) {
+          const level = layer.level;
+          const nodes = layer.nodes || [];
+          lines.push(`Level ${level}: ${nodes.length} selected`);
+          for (const node of nodes) {
+            const work = node.work || {};
+            const score = node.score !== undefined && node.score !== null ? node.score : "-";
+            const parent = node.parent_paper_id || "-";
+            const shared = (node.shared_terms || []).join(", ");
+            lines.push(`- score=${score} parent=${parent} -> ${work.paper_id || "-"} ${work.title || "-"}`);
+            if (shared) lines.push(`  shared_terms: ${shared}`);
+          }
+        }
+        recursiveResult.innerHTML = lines.map((x) => esc(x)).join("<br>");
+        await loadData();
+      } catch (err) {
+        recursiveResult.textContent = `Recursive expansion failed: ${err}`;
+      }
+    }
+
     async function loadSavedSearches() {
       savedSearchesResult.textContent = "";
       const limit = Math.max(1, Number(savedLimitInput.value || 10));
@@ -788,6 +947,7 @@ INDEX_HTML = """<!doctype html>
     searchDoiBatchBtn.addEventListener("click", searchByDoiBatch);
     relatedBtn.addEventListener("click", exploreRelated);
     similarBtn.addEventListener("click", findSimilarThemes);
+    recursiveBtn.addEventListener("click", expandRecursiveSimilarReferences);
     savedRefreshBtn.addEventListener("click", loadSavedSearches);
     scanLatestBtn.addEventListener("click", runLatestScan);
     saveAutoscanBtn.addEventListener("click", saveAutoscanConfig);
@@ -1173,6 +1333,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api/works/similar":
                 self._handle_post_similar_works()
+                LOGGER.info("web request success method=POST path=%s", parsed.path)
+                return
+            if parsed.path == "/api/works/recursive-similar-references":
+                self._handle_post_recursive_similar_references()
                 LOGGER.info("web request success method=POST path=%s", parsed.path)
                 return
             if parsed.path == "/api/latest/scan":
@@ -1644,6 +1808,195 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "topics": topics,
                 "similar": similar,
                 "save": save,
+            },
+            HTTPStatus.OK,
+        )
+
+    def _work_text_for_similarity(self, work: dict[str, Any]) -> str:
+        title = str(work.get("title") or work.get("display_name") or "").strip()
+        abstract = reconstruct_abstract(work.get("abstract_inverted_index"))
+        text = (title + "\n" + abstract).strip()
+        return text or title
+
+    def _handle_post_recursive_similar_references(self) -> None:
+        body = self._read_json_body()
+        if body is None:
+            return
+        doi = self._normalize_doi(str(body.get("doi", "")))
+        if not doi:
+            self._send_json({"error": "Invalid DOI"}, HTTPStatus.BAD_REQUEST)
+            return
+        try:
+            depth = int(body.get("depth", 3))
+            max_references = int(body.get("max_references", 10))
+            top_k = int(body.get("top_k", 2))
+            min_score = float(body.get("min_score", 0.08))
+        except (TypeError, ValueError):
+            self._send_json({"error": "depth/max_references/top_k must be integer; min_score must be number"}, HTTPStatus.BAD_REQUEST)
+            return
+        if depth <= 0 or depth > 5:
+            self._send_json({"error": "depth must be 1-5"}, HTTPStatus.BAD_REQUEST)
+            return
+        if max_references <= 0 or max_references > 200:
+            self._send_json({"error": "max_references must be 1-200"}, HTTPStatus.BAD_REQUEST)
+            return
+        if top_k <= 0 or top_k > 50:
+            self._send_json({"error": "top_k must be 1-50"}, HTTPStatus.BAD_REQUEST)
+            return
+        if min_score < 0.0 or min_score > 1.0:
+            self._send_json({"error": "min_score must be 0-1"}, HTTPStatus.BAD_REQUEST)
+            return
+        save = bool(body.get("save", True))
+
+        client = self._build_openalex_client()
+        seed_work = client.get_work_by_doi(doi)
+        if not seed_work:
+            self._send_json({"error": "Seed DOI not found"}, HTTPStatus.NOT_FOUND)
+            return
+        seed_id = canonical_work_id(seed_work.get("id"))
+        if not seed_id:
+            self._send_json({"error": "Seed work has invalid id"}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+
+        LOGGER.info(
+            "recursive-similar start seed=%s depth=%s max_references=%s top_k=%s min_score=%s save=%s",
+            seed_id,
+            depth,
+            max_references,
+            top_k,
+            min_score,
+            save,
+        )
+        t0 = time.time()
+        seed_text = self._work_text_for_similarity(seed_work)
+        seed_tokens = tokenize_for_similarity(seed_text)
+        if not seed_tokens:
+            self._send_json({"error": "Seed work has no usable abstract/title for similarity"}, HTTPStatus.BAD_REQUEST)
+            return
+
+        work_cache: dict[str, dict[str, Any]] = {seed_id: seed_work}
+        token_cache: dict[str, set[str]] = {seed_id: seed_tokens}
+        frontier: list[str] = [seed_id]
+        visited: set[str] = {seed_id}
+        edges_selected: list[dict[str, Any]] = []
+        layers: list[dict[str, Any]] = []
+        fetch_count = 1
+
+        for level in range(1, depth + 1):
+            next_frontier: list[str] = []
+            level_nodes: list[dict[str, Any]] = []
+            for parent_id in frontier:
+                parent_work = work_cache.get(parent_id)
+                if not parent_work:
+                    continue
+                ref_list = parent_work.get("referenced_works") or []
+                if not isinstance(ref_list, list):
+                    continue
+
+                candidates: list[tuple[str, float]] = []
+                considered = 0
+                for raw in ref_list:
+                    if considered >= max_references:
+                        break
+                    rid = canonical_work_id(str(raw))
+                    if not rid:
+                        continue
+                    considered += 1
+                    if rid not in work_cache:
+                        try:
+                            work_cache[rid] = client.get_work_by_id(rid)
+                            fetch_count += 1
+                        except Exception as exc:
+                            LOGGER.warning("recursive-similar fetch failed rid=%s error=%s", rid, exc)
+                            continue
+                    if rid not in token_cache:
+                        token_cache[rid] = tokenize_for_similarity(self._work_text_for_similarity(work_cache[rid]))
+                    score = jaccard_similarity(seed_tokens, token_cache[rid])
+                    candidates.append((rid, score))
+
+                candidates.sort(key=lambda x: x[1], reverse=True)
+                selected = [item for item in candidates if item[1] >= min_score][:top_k]
+                for rid, score in selected:
+                    if rid not in visited:
+                        visited.add(rid)
+                        next_frontier.append(rid)
+                    terms = shared_terms(seed_tokens, token_cache.get(rid, set()), limit=8)
+                    edges_selected.append(
+                        {
+                            "level": level,
+                            "parent_paper_id": parent_id,
+                            "paper_id": rid,
+                            "score": round(float(score), 6),
+                            "shared_terms": terms,
+                        }
+                    )
+                    level_nodes.append(
+                        {
+                            "level": level,
+                            "parent_paper_id": parent_id,
+                            "score": round(float(score), 4),
+                            "shared_terms": terms,
+                            "work": self._serialize_work(work_cache[rid]),
+                        }
+                    )
+
+            layers.append({"level": level, "nodes": level_nodes})
+            frontier = next_frontier
+            if not frontier:
+                break
+
+        if save:
+            conn = connect(self.db_path)
+            try:
+                upsert_work(conn, seed_work, source="web-recursive-seed")
+                add_watch_target(
+                    conn,
+                    target_type="paper",
+                    target_value=seed_id,
+                    enabled=1,
+                    note=f"web recursive seed doi:{doi}",
+                )
+                saved_ids: set[str] = {seed_id}
+                for edge in edges_selected:
+                    saved_ids.add(str(edge["parent_paper_id"]))
+                    saved_ids.add(str(edge["paper_id"]))
+                for wid in saved_ids:
+                    work = work_cache.get(wid)
+                    if work:
+                        upsert_work(conn, work, source="web-recursive-node")
+                for edge in edges_selected:
+                    parent_id = str(edge["parent_paper_id"])
+                    rid = str(edge["paper_id"])
+                    add_edge(conn, parent_id, rid, "references")
+                    add_edge(conn, parent_id, rid, "ref_similar")
+                conn.commit()
+            finally:
+                conn.close()
+
+        elapsed_ms = int((time.time() - t0) * 1000)
+        selected_total = 0
+        for layer in layers:
+            selected_total += len(layer.get("nodes") or [])
+        LOGGER.info(
+            "recursive-similar success seed=%s layers=%s selected=%s fetch_count=%s elapsed_ms=%s",
+            seed_id,
+            len(layers),
+            selected_total,
+            fetch_count,
+            elapsed_ms,
+        )
+        self._send_json(
+            {
+                "ok": True,
+                "seed": self._serialize_work(seed_work),
+                "depth": depth,
+                "max_references": max_references,
+                "top_k": top_k,
+                "min_score": min_score,
+                "layers": layers,
+                "save": save,
+                "fetch_count": fetch_count,
+                "elapsed_ms": elapsed_ms,
             },
             HTTPStatus.OK,
         )

@@ -683,6 +683,173 @@ class TestCliRegression(unittest.TestCase):
                 server.server_close()
                 thread.join(timeout=5)
 
+    def test_web_recursive_similar_references_depth3_returns_layers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_path = tmp_path / "web_recursive_similar.db"
+
+            init_rc = run_cli(["init-db", "--db-path", str(db_path)], ROOT)
+            self.assertEqual(init_rc.returncode, 0, msg=init_rc.stdout + init_rc.stderr)
+
+            def inv(text: str) -> dict[str, list[int]]:
+                words = [w.strip().lower() for w in text.split() if w.strip()]
+                out: dict[str, list[int]] = {}
+                for i, w in enumerate(words):
+                    out.setdefault(w, []).append(i)
+                return out
+
+            works_by_id = {
+                "WSEEDREC": {
+                    "id": "https://openalex.org/WSEEDREC",
+                    "title": "Seed Rec",
+                    "doi": "https://doi.org/10.1000/seed-rec",
+                    "abstract_inverted_index": inv("protein adenine editor design"),
+                    "referenced_works": [
+                        "https://openalex.org/WREFGOOD",
+                        "https://openalex.org/WREFBAD",
+                        "https://openalex.org/WREFBAD2",
+                    ],
+                },
+                "WREFGOOD": {
+                    "id": "https://openalex.org/WREFGOOD",
+                    "title": "Good Ref",
+                    "doi": "https://doi.org/10.1000/goodref",
+                    "abstract_inverted_index": inv("adenine editor protein"),
+                    "referenced_works": ["https://openalex.org/WREFGOODA", "https://openalex.org/WREFGOODB"],
+                },
+                "WREFBAD": {
+                    "id": "https://openalex.org/WREFBAD",
+                    "title": "Bad Ref",
+                    "doi": "https://doi.org/10.1000/badref",
+                    "abstract_inverted_index": inv("image classification transformer"),
+                    "referenced_works": [],
+                },
+                "WREFBAD2": {
+                    "id": "https://openalex.org/WREFBAD2",
+                    "title": "Bad Ref 2",
+                    "doi": "https://doi.org/10.1000/badref2",
+                    "abstract_inverted_index": inv("economics inflation forecast"),
+                    "referenced_works": [],
+                },
+                "WREFGOODA": {
+                    "id": "https://openalex.org/WREFGOODA",
+                    "title": "Good A",
+                    "doi": "https://doi.org/10.1000/gooda",
+                    "abstract_inverted_index": inv("protein editor adenine"),
+                    "referenced_works": ["https://openalex.org/WREFGOODA1"],
+                },
+                "WREFGOODB": {
+                    "id": "https://openalex.org/WREFGOODB",
+                    "title": "Good B",
+                    "doi": "https://doi.org/10.1000/goodb",
+                    "abstract_inverted_index": inv("unrelated topic tokens"),
+                    "referenced_works": [],
+                },
+                "WREFGOODA1": {
+                    "id": "https://openalex.org/WREFGOODA1",
+                    "title": "Good A1",
+                    "doi": "https://doi.org/10.1000/gooda1",
+                    "abstract_inverted_index": inv("adenine base editor protein"),
+                    "referenced_works": [],
+                },
+            }
+
+            class _FakeClient:
+                def get_work_by_doi(self, doi: str) -> dict[str, object] | None:
+                    if doi != "10.1000/seed-rec":
+                        return None
+                    return works_by_id["WSEEDREC"]
+
+                def get_work_by_id(self, work_id: str) -> dict[str, object]:
+                    wid = work_id
+                    if wid.startswith("https://openalex.org/"):
+                        wid = wid.rsplit("/", 1)[-1]
+                    if wid not in works_by_id:
+                        raise ValueError(f"unknown work_id {work_id}")
+                    return works_by_id[wid]
+
+            from src.web_server import create_http_server
+
+            with mock.patch("src.web_server.OpenAlexClient", return_value=_FakeClient()):
+                server = create_http_server(db_path, host="127.0.0.1", port=0, default_recent_runs=5)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    port = int(server.server_address[1])
+                    url = f"http://127.0.0.1:{port}/api/works/recursive-similar-references"
+                    body = json.dumps(
+                        {
+                            "doi": "10.1000/seed-rec",
+                            "depth": 3,
+                            "max_references": 3,
+                            "top_k": 1,
+                            "min_score": 0.2,
+                            "save": True,
+                        }
+                    ).encode("utf-8")
+                    req = urllib.request.Request(
+                        url,
+                        data=body,
+                        method="POST",
+                        headers={"Content-Type": "application/json"},
+                    )
+                    with urllib.request.urlopen(req, timeout=3) as response:
+                        self.assertEqual(response.status, 200)
+                        payload = json.loads(response.read().decode("utf-8"))
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    thread.join(timeout=5)
+
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["seed"]["paper_id"], "WSEEDREC")
+            layers = payload["layers"]
+            self.assertEqual(len(layers), 3)
+            self.assertEqual(layers[0]["level"], 1)
+            self.assertEqual(layers[0]["nodes"][0]["work"]["paper_id"], "WREFGOOD")
+            self.assertEqual(layers[1]["nodes"][0]["work"]["paper_id"], "WREFGOODA")
+            self.assertEqual(layers[2]["nodes"][0]["work"]["paper_id"], "WREFGOODA1")
+
+            conn = sqlite3.connect(db_path)
+            try:
+                watch_count = int(conn.execute("SELECT COUNT(*) FROM watch_targets WHERE target_value='WSEEDREC'").fetchone()[0])
+                similar_edges = int(conn.execute("SELECT COUNT(*) FROM edges WHERE relation='ref_similar'").fetchone()[0])
+            finally:
+                conn.close()
+            self.assertEqual(watch_count, 1)
+            self.assertEqual(similar_edges, 3)
+
+    def test_web_recursive_similar_references_invalid_doi_returns_400(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_path = tmp_path / "web_recursive_similar_invalid.db"
+
+            init_rc = run_cli(["init-db", "--db-path", str(db_path)], ROOT)
+            self.assertEqual(init_rc.returncode, 0, msg=init_rc.stdout + init_rc.stderr)
+
+            from src.web_server import create_http_server
+
+            server = create_http_server(db_path, host="127.0.0.1", port=0, default_recent_runs=5)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                port = int(server.server_address[1])
+                url = f"http://127.0.0.1:{port}/api/works/recursive-similar-references"
+                body = json.dumps({"doi": "bad", "depth": 3}).encode("utf-8")
+                req = urllib.request.Request(
+                    url,
+                    data=body,
+                    method="POST",
+                    headers={"Content-Type": "application/json"},
+                )
+                with self.assertRaises(urllib.error.HTTPError) as cm:
+                    urllib.request.urlopen(req, timeout=2)
+                self.assertEqual(cm.exception.code, 400)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
     def test_web_saved_searches_returns_history(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
